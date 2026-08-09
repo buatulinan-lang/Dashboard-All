@@ -32,6 +32,12 @@ st.set_page_config(page_title="Dashboard Service Cabang", layout="wide", page_ic
 # data secara permanen, ganti/timpa file ini di GitHub lalu reboot app.
 DEFAULT_DATA_PATH = Path(__file__).parent / "data" / "latest_data.csv.gz"
 
+# Data faktur penjualan (omzet, modal, laba) — dipakai tab Penjualan & Voucher MLF.
+DEFAULT_SALES_PATH = Path(__file__).parent / "data" / "penjualan.csv.gz"
+
+# Nama barang untuk voucher tiket MLF (dicocokkan tanpa membedakan huruf besar/kecil)
+MLF_ITEM = "VOUCHER TICKET MLF 2026"
+
 BULAN_NAMES = ['', 'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli',
                'Agustus', 'September', 'Oktober', 'November', 'Desember']
 
@@ -201,6 +207,87 @@ def load_data(file_bytes: bytes, source_kind: str) -> pd.DataFrame:
     full.attrs['total_raw_rows'] = total_raw
     full.attrs['total_unique'] = total_unique
     return full
+
+
+SALES_REQUIRED = ['TGL FAKTUR', 'NO FAKTUR', 'KATEGORI BARANG', 'NAMA BARANG',
+                  'HARGA BELI', 'QTY', '@HARGA', 'TOTAL HARGA', 'CABANG']
+
+
+@st.cache_data(show_spinner="Membaca data penjualan...")
+def load_sales(file_bytes: bytes, source_kind: str) -> pd.DataFrame:
+    """Baca data faktur penjualan.
+
+    Catatan penting soal kolom HARGA BELI: di sumber data ini nilainya sudah
+    berupa TOTAL modal untuk baris tersebut (sudah dikali QTY), bukan harga
+    satuan. Ini diverifikasi dari baris ber-QTY>1, mis. voucher MLF dengan
+    HARGA BELI 34.000 untuk QTY 2 — sama dengan 17.000/unit pada baris QTY 1.
+    Karena itu MODAL = HARGA BELI (tidak dikalikan QTY lagi).
+    """
+    if source_kind == 'csv_gz':
+        df = pd.read_csv(io.BytesIO(file_bytes), compression='gzip')
+    else:
+        xls = pd.ExcelFile(io.BytesIO(file_bytes), engine='openpyxl')
+        frames = []
+        for sheet in xls.sheet_names:
+            d = xls.parse(sheet)
+            if d.empty:
+                continue
+            d['CABANG'] = sheet
+            frames.append(d)
+        if not frames:
+            return pd.DataFrame()
+        df = pd.concat(frames, ignore_index=True, sort=False)
+
+    if df.empty:
+        return df
+
+    missing = [c for c in SALES_REQUIRED if c not in df.columns]
+    if missing:
+        raise ValueError(
+            "Kolom berikut tidak ditemukan di data penjualan: " + ", ".join(missing)
+        )
+
+    for c in ['HARGA BELI', 'QTY', '@HARGA', 'TOTAL HARGA']:
+        df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+
+    df['TGL'] = pd.to_datetime(df['TGL FAKTUR'], errors='coerce')
+    df['TAHUN'] = df['TGL'].dt.year
+    df['BULAN'] = df['TGL'].dt.month
+    df['MODAL'] = df['HARGA BELI']
+    df['LABA'] = df['TOTAL HARGA'] - df['MODAL']
+    df['KATEGORI'] = (df['KATEGORI BARANG'].astype(str).str.strip().str.upper()
+                      .replace({'NAN': 'TIDAK ADA DATA', '': 'TIDAK ADA DATA'}))
+    df['BARANG'] = df['NAMA BARANG'].astype(str).str.strip()
+    df['BARANG_U'] = df['BARANG'].str.upper()
+    if 'YANG MENYERAHKAN/MENJUAL' in df.columns:
+        df['PENJUAL'] = (df['YANG MENYERAHKAN/MENJUAL'].astype(str).str.strip()
+                         .replace({'nan': 'TIDAK ADA DATA', '': 'TIDAK ADA DATA'}))
+    else:
+        df['PENJUAL'] = 'TIDAK ADA DATA'
+    return df
+
+
+def rp(v, singkat=True):
+    """Format rupiah ringkas: 1,2 M / 340,5 jt / 12.500."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return "-"
+    neg = v < 0
+    v = abs(v)
+    if singkat:
+        if v >= 1_000_000_000:
+            s = f"Rp {v/1_000_000_000:,.2f} M"
+        elif v >= 1_000_000:
+            s = f"Rp {v/1_000_000:,.1f} jt"
+        elif v >= 1_000:
+            s = f"Rp {v/1_000:,.0f} rb"
+        else:
+            s = f"Rp {v:,.0f}"
+    else:
+        s = f"Rp {v:,.0f}"
+    s = s.replace(",", "#").replace(".", ",").replace("#", ".")
+    return ("-" + s) if neg else s
 
 
 def apply_filters(df: pd.DataFrame, tahun, bulan, cabang) -> pd.DataFrame:
@@ -429,9 +516,38 @@ if data.empty:
 total_raw_rows = data.attrs.get('total_raw_rows', len(data))
 total_unique = data.attrs.get('total_unique', len(data))
 
-tahun_opts = ['Semua Tahun'] + sorted([int(t) for t in data['TAHUN'].dropna().unique()])
-bulan_opts = ['Semua Bulan'] + sorted([int(b) for b in data['BULAN'].dropna().unique()])
-cabang_opts = ['Semua Cabang'] + sorted(data['CABANG'].dropna().unique().tolist())
+# --- data penjualan (opsional; kalau tidak ada, tab Penjualan & MLF nonaktif) ---
+sales_uploaded = st.sidebar.file_uploader(
+    "Upload data penjualan (opsional)",
+    type=['xlsx', 'gz', 'csv'],
+    help="Format faktur penjualan: satu sheet per cabang, atau file penjualan.csv.gz.",
+    key="sales_upload",
+)
+sales = pd.DataFrame()
+sales_err = ""
+try:
+    if sales_uploaded is not None:
+        _kind = 'csv_gz' if sales_uploaded.name.endswith(('.gz', '.csv')) else 'xlsx'
+        sales = load_sales(sales_uploaded.getvalue(), _kind)
+        st.sidebar.success("💰 Data penjualan dari file yang diupload.")
+    elif DEFAULT_SALES_PATH.exists():
+        sales = load_sales(DEFAULT_SALES_PATH.read_bytes(), 'csv_gz')
+        st.sidebar.info("💰 Data penjualan bawaan repo dimuat.")
+except Exception as e:  # noqa: BLE001
+    sales_err = str(e)
+    st.sidebar.warning(f"Data penjualan tidak terbaca: {e}")
+
+tahun_src = set(int(t) for t in data['TAHUN'].dropna().unique())
+bulan_src = set(int(b) for b in data['BULAN'].dropna().unique())
+cabang_src = set(data['CABANG'].dropna().unique().tolist())
+if not sales.empty:
+    tahun_src |= set(int(t) for t in sales['TAHUN'].dropna().unique())
+    bulan_src |= set(int(b) for b in sales['BULAN'].dropna().unique())
+    cabang_src |= set(sales['CABANG'].dropna().unique().tolist())
+
+tahun_opts = ['Semua Tahun'] + sorted(tahun_src)
+bulan_opts = ['Semua Bulan'] + sorted(bulan_src)
+cabang_opts = ['Semua Cabang'] + sorted(cabang_src)
 
 st.sidebar.title("🔎 Filter")
 f_tahun = st.sidebar.selectbox("Tahun", tahun_opts, format_func=lambda x: str(x))
@@ -445,6 +561,7 @@ st.sidebar.caption(
 )
 
 filtered = apply_filters(data, f_tahun, f_bulan, f_cabang)
+sales_f = apply_filters(sales, f_tahun, f_bulan, f_cabang) if not sales.empty else sales
 
 # ---------------------------------------------------------------------------
 # Sidebar: buat PPT dari dashboard
@@ -543,8 +660,9 @@ if st.session_state.get("ppt_bytes"):
 # ---------------------------------------------------------------------------
 # TABS
 # ---------------------------------------------------------------------------
-tab_main, tab_pending, tab_done, tab_cancel = st.tabs(
-    ["📊 Dashboard Utama", "⚠️ Dashboard Pending", "✅ Dashboard Done", "🚫 Dashboard Cancel"]
+tab_main, tab_pending, tab_done, tab_cancel, tab_jual, tab_mlf = st.tabs(
+    ["📊 Dashboard Utama", "⚠️ Dashboard Pending", "✅ Dashboard Done",
+     "🚫 Dashboard Cancel", "💰 Penjualan", "🎫 Voucher MLF"]
 )
 
 # =============================================================================
@@ -746,3 +864,306 @@ with tab_cancel:
         ),
         key_prefix='cancel',
     )
+
+# =============================================================================
+# TAB 5: PENJUALAN (harga modal vs harga jual)
+# =============================================================================
+with tab_jual:
+    st.markdown("## Dashboard Penjualan — Modal, Omzet & Laba Kotor")
+
+    if sales.empty:
+        st.info(
+            "Data penjualan belum tersedia. Tambahkan file `data/penjualan.csv.gz` ke repo, "
+            "atau upload lewat panel kiri (**Upload data penjualan**)."
+            + (f"\n\nPesan: {sales_err}" if sales_err else "")
+        )
+    elif sales_f.empty:
+        st.warning("Tidak ada data penjualan untuk filter yang dipilih.")
+    else:
+        sj = sales_f
+        omzet = sj['TOTAL HARGA'].sum()
+        modal = sj['MODAL'].sum()
+        laba = sj['LABA'].sum()
+        margin = (laba / omzet * 100) if omzet else 0
+        n_faktur = sj['NO FAKTUR'].nunique()
+        qty = sj['QTY'].sum()
+
+        st.markdown(kpi_html([
+            {'label': 'Omzet (Harga Jual)', 'value': rp(omzet), 'sub': f"{len(sj):,} baris faktur",
+             'grad': 'linear-gradient(135deg,#1f3864,#2e5394)'},
+            {'label': 'Modal (Harga Beli)', 'value': rp(modal),
+             'sub': f"{(modal/omzet*100 if omzet else 0):.1f}% dari omzet",
+             'grad': 'linear-gradient(135deg,#c9392f,#e0475a)'},
+            {'label': 'Laba Kotor', 'value': rp(laba), 'sub': f"margin {margin:.1f}%",
+             'grad': 'linear-gradient(135deg,#16a34a,#22c55e)'},
+            {'label': 'Jumlah Faktur', 'value': f"{n_faktur:,}",
+             'sub': f"rata-rata {rp(omzet/n_faktur if n_faktur else 0)}/faktur",
+             'grad': 'linear-gradient(135deg,#7c3aed,#a855f7)'},
+            {'label': 'Unit Terjual', 'value': f"{qty:,.0f}",
+             'sub': f"laba {rp(laba/qty if qty else 0)}/unit",
+             'grad': 'linear-gradient(135deg,#0f8a82,#17a3a3)'},
+            {'label': 'Baris Rugi', 'value': f"{(sj['LABA'] < 0).sum():,}",
+             'sub': f"{(sj['LABA'] < 0).mean()*100:.1f}% dari baris",
+             'grad': 'linear-gradient(135deg,#e0921f,#e2b21a)'},
+        ]), unsafe_allow_html=True)
+        st.write("")
+
+        c1, c2 = st.columns([1.25, 1])
+        with c1:
+            st.markdown("#### Tren Omzet, Modal & Laba per Bulan")
+            tren = (sj.groupby('BULAN')[['TOTAL HARGA', 'MODAL', 'LABA']].sum()
+                    .sort_index())
+            figt = go.Figure()
+            figt.add_bar(x=[BULAN_NAMES[int(b)][:3] for b in tren.index],
+                         y=tren['MODAL'], name='Modal', marker_color='#c9392f')
+            figt.add_bar(x=[BULAN_NAMES[int(b)][:3] for b in tren.index],
+                         y=tren['LABA'], name='Laba', marker_color='#16a34a')
+            figt.update_layout(barmode='stack', height=350,
+                               margin=dict(l=10, r=10, t=10, b=10),
+                               legend=dict(orientation='h', y=1.12),
+                               yaxis_title='Rupiah')
+            st.plotly_chart(figt, use_container_width=True, key='jual_tren')
+            st.caption("Tinggi batang = omzet (modal + laba).")
+        with c2:
+            st.markdown("#### Komposisi Omzet per Kategori")
+            kd = (sj.groupby('KATEGORI')['TOTAL HARGA'].sum()
+                  .sort_values(ascending=False).head(8).reset_index())
+            kd.columns = ['Kategori', 'Omzet']
+            figk = px.pie(kd, names='Kategori', values='Omzet', hole=0.55,
+                          color_discrete_sequence=PALETTE)
+            figk.update_layout(height=350, margin=dict(l=5, r=5, t=5, b=5),
+                               legend=dict(font=dict(size=9)))
+            st.plotly_chart(figk, use_container_width=True, key='jual_pie')
+
+        st.markdown("#### Rekap per Kategori Barang")
+        gk = sj.groupby('KATEGORI').agg(
+            Qty=('QTY', 'sum'), Omzet=('TOTAL HARGA', 'sum'),
+            Modal=('MODAL', 'sum'), Laba=('LABA', 'sum'), Baris=('QTY', 'size'))
+        gk['Margin %'] = (gk['Laba'] / gk['Omzet'] * 100).round(1)
+        gk = gk.sort_values('Omzet', ascending=False)
+        st.dataframe(gk.style.format({'Qty': '{:,.0f}', 'Omzet': 'Rp {:,.0f}',
+                                      'Modal': 'Rp {:,.0f}', 'Laba': 'Rp {:,.0f}',
+                                      'Baris': '{:,.0f}'}),
+                     use_container_width=True, key='jual_kat')
+
+        st.markdown("#### Rekap per Cabang")
+        gc = sj.groupby('CABANG').agg(
+            Qty=('QTY', 'sum'), Omzet=('TOTAL HARGA', 'sum'),
+            Modal=('MODAL', 'sum'), Laba=('LABA', 'sum'),
+            Faktur=('NO FAKTUR', 'nunique'))
+        gc['Margin %'] = (gc['Laba'] / gc['Omzet'] * 100).round(1)
+        gc = gc.sort_values('Omzet', ascending=False)
+        cc1, cc2 = st.columns([1, 1.1])
+        with cc1:
+            st.dataframe(gc.style.format({'Qty': '{:,.0f}', 'Omzet': 'Rp {:,.0f}',
+                                          'Modal': 'Rp {:,.0f}', 'Laba': 'Rp {:,.0f}',
+                                          'Faktur': '{:,.0f}'}),
+                         use_container_width=True, height=420, key='jual_cab')
+        with cc2:
+            gcs = gc.sort_values('Omzet', ascending=True)
+            figc = go.Figure()
+            figc.add_bar(y=gcs.index, x=gcs['Modal'], orientation='h',
+                         name='Modal', marker_color='#c9392f')
+            figc.add_bar(y=gcs.index, x=gcs['Laba'], orientation='h',
+                         name='Laba', marker_color='#16a34a')
+            figc.update_layout(barmode='stack', height=420,
+                               margin=dict(l=10, r=10, t=10, b=10),
+                               legend=dict(orientation='h', y=1.06),
+                               xaxis_title='Rupiah')
+            st.plotly_chart(figc, use_container_width=True, key='jual_cab_fig')
+
+        b1, b2 = st.columns(2)
+        with b1:
+            st.markdown("#### 15 Barang — Omzet Tertinggi")
+            tb = (sj.groupby('BARANG').agg(Qty=('QTY', 'sum'),
+                                           Omzet=('TOTAL HARGA', 'sum'),
+                                           Laba=('LABA', 'sum'))
+                  .sort_values('Omzet', ascending=False).head(15))
+            tb['Margin %'] = (tb['Laba'] / tb['Omzet'] * 100).round(1)
+            st.dataframe(tb.style.format({'Qty': '{:,.0f}', 'Omzet': 'Rp {:,.0f}',
+                                          'Laba': 'Rp {:,.0f}'}),
+                         use_container_width=True, height=380, key='jual_brg1')
+        with b2:
+            st.markdown("#### 15 Barang — Laba Tertinggi")
+            tl = (sj.groupby('BARANG').agg(Qty=('QTY', 'sum'),
+                                           Omzet=('TOTAL HARGA', 'sum'),
+                                           Laba=('LABA', 'sum'))
+                  .sort_values('Laba', ascending=False).head(15))
+            tl['Margin %'] = (tl['Laba'] / tl['Omzet'] * 100).round(1)
+            st.dataframe(tl.style.format({'Qty': '{:,.0f}', 'Omzet': 'Rp {:,.0f}',
+                                          'Laba': 'Rp {:,.0f}'}),
+                         use_container_width=True, height=380, key='jual_brg2')
+
+        st.markdown("#### Detail Faktur")
+        q = st.text_input("Cari barang / faktur / customer / kategori", key='jual_cari')
+        cols = ['TGL FAKTUR', 'NO FAKTUR', 'CABANG', 'KATEGORI', 'NAMA BARANG',
+                'HARGA BELI', 'QTY', '@HARGA', 'TOTAL HARGA', 'LABA']
+        cols = [c for c in cols if c in sj.columns]
+        dd = sj[cols].copy()
+        if q:
+            mask = dd.apply(lambda r: q.upper() in ' '.join(str(v) for v in r.values).upper(), axis=1)
+            dd = dd[mask]
+        st.caption(f"{len(dd):,} baris ditampilkan (maksimal 1.000).")
+        st.dataframe(dd.head(1000), use_container_width=True, height=360, key='jual_detail')
+
+        with st.expander("ℹ️ Catatan metodologi"):
+            st.write(
+                "**Modal** diambil dari kolom `HARGA BELI`, yang di sumber data ini sudah berupa "
+                "**total** untuk baris tersebut (sudah dikali QTY) — bukan harga satuan. Ini "
+                "diverifikasi dari baris ber-QTY lebih dari 1; contohnya voucher MLF dengan "
+                "HARGA BELI 34.000 untuk QTY 2, konsisten dengan 17.000/unit pada baris QTY 1. "
+                "Kalau modal dianggap harga satuan, total modal jadi 3x omzet dan margin menjadi "
+                "minus 197% — jelas keliru.\n\n"
+                "**Laba kotor** = TOTAL HARGA − MODAL, jadi belum dikurangi biaya operasional, "
+                "gaji, sewa, dan lainnya.\n\n"
+                "Baris berkategori **JASA** hampir semuanya bermodal 0, sehingga marginnya tampil "
+                "100%. Itu wajar karena biaya tenaga kerja tidak dibebankan per faktur — perlu "
+                "diingat saat membandingkan margin antar kategori.\n\n"
+                "Semua baris dihitung apa adanya tanpa pembuangan duplikat, sesuai kesepakatan "
+                "(di data ini duplikat persis hanya sekitar 90 dari 172.791 baris)."
+            )
+
+# =============================================================================
+# TAB 6: VOUCHER TIKET MLF
+# =============================================================================
+with tab_mlf:
+    st.markdown("## Dashboard Voucher Tiket MLF — Rekap Semua Cabang")
+
+    if sales.empty:
+        st.info(
+            "Data penjualan belum tersedia. Tambahkan file `data/penjualan.csv.gz` ke repo, "
+            "atau upload lewat panel kiri."
+        )
+    else:
+        mlf_all = sales[sales['BARANG_U'].str.contains('MLF', na=False)]
+        mlf = sales_f[sales_f['BARANG_U'].str.contains('MLF', na=False)] if not sales_f.empty \
+            else sales_f
+
+        if mlf_all.empty:
+            st.warning("Tidak ditemukan barang yang mengandung kata 'MLF' pada data penjualan.")
+        elif mlf.empty:
+            st.warning("Tidak ada penjualan voucher MLF untuk filter yang dipilih.")
+        else:
+            qty = mlf['QTY'].sum()
+            omzet = mlf['TOTAL HARGA'].sum()
+            modal = mlf['MODAL'].sum()
+            laba = mlf['LABA'].sum()
+            margin = (laba / omzet * 100) if omzet else 0
+            n_cab = mlf['CABANG'].nunique()
+            hari = mlf['TGL'].dt.normalize().nunique()
+
+            st.markdown(kpi_html([
+                {'label': 'Voucher Terjual', 'value': f"{qty:,.0f}", 'sub': f"{len(mlf):,} transaksi",
+                 'grad': 'linear-gradient(135deg,#1f3864,#2e5394)'},
+                {'label': 'Omzet', 'value': rp(omzet),
+                 'sub': f"rata-rata {rp(omzet/qty if qty else 0)}/voucher",
+                 'grad': 'linear-gradient(135deg,#2e9bd6,#17a3a3)'},
+                {'label': 'Modal', 'value': rp(modal),
+                 'sub': f"{(modal/omzet*100 if omzet else 0):.1f}% dari omzet",
+                 'grad': 'linear-gradient(135deg,#c9392f,#e0475a)'},
+                {'label': 'Laba Kotor', 'value': rp(laba), 'sub': f"margin {margin:.1f}%",
+                 'grad': 'linear-gradient(135deg,#16a34a,#22c55e)'},
+                {'label': 'Cabang Menjual', 'value': f"{n_cab}",
+                 'sub': f"dari {sales['CABANG'].nunique()} cabang",
+                 'grad': 'linear-gradient(135deg,#7c3aed,#a855f7)'},
+                {'label': 'Rata-rata / Hari', 'value': f"{(qty/hari if hari else 0):,.1f}",
+                 'sub': f"{hari} hari ada penjualan",
+                 'grad': 'linear-gradient(135deg,#e0921f,#e2b21a)'},
+            ]), unsafe_allow_html=True)
+            st.write("")
+
+            m1, m2 = st.columns([1.3, 1])
+            with m1:
+                st.markdown("#### Tren Penjualan Voucher per Hari")
+                dly = mlf.groupby(mlf['TGL'].dt.normalize())['QTY'].sum().sort_index()
+                figd = go.Figure(go.Scatter(
+                    x=dly.index, y=dly.values, mode='lines+markers',
+                    line=dict(color='#1f3864', width=2), marker=dict(size=4),
+                    name='Voucher'))
+                figd.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10),
+                                   yaxis_title='Jumlah voucher')
+                st.plotly_chart(figd, use_container_width=True, key='mlf_daily')
+                if len(dly):
+                    st.caption(
+                        f"Tertinggi: {int(dly.max())} voucher pada "
+                        f"{dly.idxmax().strftime('%d %B %Y')}."
+                    )
+            with m2:
+                st.markdown("#### Porsi Penjualan per Cabang")
+                pc = mlf.groupby('CABANG')['QTY'].sum().sort_values(ascending=False)
+                top6 = pc.head(6)
+                if len(pc) > 6:
+                    top6 = pd.concat([top6, pd.Series({'Lainnya': pc.iloc[6:].sum()})])
+                figp = px.pie(names=top6.index, values=top6.values, hole=0.55,
+                              color_discrete_sequence=PALETTE)
+                figp.update_layout(height=340, margin=dict(l=5, r=5, t=5, b=5),
+                                   legend=dict(font=dict(size=9)))
+                st.plotly_chart(figp, use_container_width=True, key='mlf_pie')
+
+            st.markdown("#### Rekap per Cabang")
+            gm = mlf.groupby('CABANG').agg(
+                Voucher=('QTY', 'sum'), Transaksi=('QTY', 'size'),
+                Omzet=('TOTAL HARGA', 'sum'), Modal=('MODAL', 'sum'), Laba=('LABA', 'sum'))
+            gm['Margin %'] = (gm['Laba'] / gm['Omzet'] * 100).round(1)
+            gm['Porsi %'] = (gm['Voucher'] / gm['Voucher'].sum() * 100).round(1)
+            gm = gm.sort_values('Voucher', ascending=False)
+
+            g1, g2 = st.columns([1, 1])
+            with g1:
+                st.dataframe(gm.style.format({'Voucher': '{:,.0f}', 'Transaksi': '{:,.0f}',
+                                              'Omzet': 'Rp {:,.0f}', 'Modal': 'Rp {:,.0f}',
+                                              'Laba': 'Rp {:,.0f}'}),
+                             use_container_width=True, height=420, key='mlf_cab')
+            with g2:
+                gms = gm.sort_values('Voucher', ascending=True)
+                figb = go.Figure(go.Bar(
+                    y=gms.index, x=gms['Voucher'], orientation='h',
+                    marker_color='#1f3864',
+                    text=[f"{int(v):,}" for v in gms['Voucher']], textposition='outside'))
+                figb.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10),
+                                   xaxis_title='Voucher terjual')
+                st.plotly_chart(figb, use_container_width=True, key='mlf_cab_fig')
+
+            p1, p2 = st.columns(2)
+            with p1:
+                st.markdown("#### 15 Penjual Teratas")
+                gp = (mlf.groupby('PENJUAL').agg(Voucher=('QTY', 'sum'),
+                                                 Omzet=('TOTAL HARGA', 'sum'))
+                      .sort_values('Voucher', ascending=False).head(15))
+                gp['Porsi %'] = (gp['Voucher'] / mlf['QTY'].sum() * 100).round(1)
+                st.dataframe(gp.style.format({'Voucher': '{:,.0f}', 'Omzet': 'Rp {:,.0f}'}),
+                             use_container_width=True, height=380, key='mlf_penjual')
+            with p2:
+                st.markdown("#### Rekap per Bulan")
+                gb = mlf.groupby('BULAN').agg(Voucher=('QTY', 'sum'),
+                                              Omzet=('TOTAL HARGA', 'sum'),
+                                              Laba=('LABA', 'sum')).sort_index()
+                gb.index = [BULAN_NAMES[int(b)] for b in gb.index]
+                st.dataframe(gb.style.format({'Voucher': '{:,.0f}', 'Omzet': 'Rp {:,.0f}',
+                                              'Laba': 'Rp {:,.0f}'}),
+                             use_container_width=True, height=380, key='mlf_bulan')
+
+            st.markdown("#### Detail Transaksi Voucher")
+            qm = st.text_input("Cari cabang / penjual / faktur", key='mlf_cari')
+            colm = ['TGL FAKTUR', 'NO FAKTUR', 'CABANG', 'PENJUAL', 'NAMA BARANG',
+                    'HARGA BELI', 'QTY', '@HARGA', 'TOTAL HARGA', 'LABA']
+            colm = [c for c in colm if c in mlf.columns]
+            dm = mlf[colm].copy()
+            if qm:
+                mask = dm.apply(lambda r: qm.upper() in ' '.join(str(v) for v in r.values).upper(), axis=1)
+                dm = dm[mask]
+            st.caption(f"{len(dm):,} baris ditampilkan (maksimal 1.000).")
+            st.dataframe(dm.head(1000), use_container_width=True, height=340, key='mlf_detail')
+
+            with st.expander("ℹ️ Catatan metodologi"):
+                nm = mlf['BARANG'].value_counts()
+                st.write(
+                    "Yang dihitung adalah semua baris yang **nama barangnya mengandung kata "
+                    "'MLF'**. Item yang terdeteksi pada data saat ini:"
+                )
+                st.write("\n".join(f"- {k} ({v:,} baris)" for k, v in nm.items()))
+                st.write(
+                    "\n**Modal** dari kolom HARGA BELI yang sudah berupa total per baris "
+                    "(bukan harga satuan). **Laba kotor** = TOTAL HARGA − MODAL, belum "
+                    "dikurangi biaya operasional."
+                )

@@ -485,6 +485,13 @@ if st.sidebar.button("🎬 Buat PPT dari Dashboard", use_container_width=True, t
         st.sidebar.error("Tidak ada data pada filter aktif — ganti filter dulu.")
     else:
         try:
+            # pastikan folder app ikut dicari saat import (beberapa host tidak
+            # otomatis menaruh folder skrip di sys.path)
+            import sys
+            _app_dir = str(Path(__file__).parent.resolve())
+            if _app_dir not in sys.path:
+                sys.path.insert(0, _app_dir)
+
             from pptx_export import build_deck
             with st.spinner("Menyusun presentasi..."):
                 _ppt_bytes = build_deck(
@@ -501,13 +508,28 @@ if st.sidebar.button("🎬 Buat PPT dari Dashboard", use_container_width=True, t
             _tag_c = "SemuaCabang" if f_cabang == "Semua Cabang" else str(f_cabang)
             st.session_state["ppt_name"] = f"Laporan_Service_{_tag_t}{_tag_b}_{_tag_c}.pptx"
             st.sidebar.success("Presentasi siap diunduh.")
-        except ModuleNotFoundError:
-            st.sidebar.error(
-                "File pptx_export.py tidak ditemukan. Pastikan berada di folder yang "
-                "sama dengan app.py."
-            )
+        except ModuleNotFoundError as e:
+            _missing = getattr(e, "name", "") or str(e)
+            if _missing == "pptx_export":
+                _here = sorted(p.name for p in Path(__file__).parent.iterdir())
+                st.sidebar.error(
+                    "File **pptx_export.py** tidak ditemukan di folder yang sama "
+                    "dengan app.py.\n\nIsi folder saat ini: " + ", ".join(_here)
+                )
+            elif _missing in ("pptx", "python-pptx"):
+                st.sidebar.error(
+                    "Library **python-pptx** belum terpasang.\n\n"
+                    "Tambahkan baris `python-pptx>=1.0` ke file **requirements.txt** "
+                    "di repo, lalu reboot aplikasi. Kalau menjalankan di komputer "
+                    "sendiri: `pip install python-pptx`."
+                )
+            else:
+                st.sidebar.error(
+                    f"Library **{_missing}** belum terpasang. Tambahkan ke "
+                    "requirements.txt lalu reboot aplikasi."
+                )
         except Exception as e:  # noqa: BLE001
-            st.sidebar.error(f"Gagal membuat PPT: {e}")
+            st.sidebar.error(f"Gagal membuat PPT: {type(e).__name__}: {e}")
 
 if st.session_state.get("ppt_bytes"):
     st.sidebar.download_button(

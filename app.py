@@ -264,7 +264,97 @@ def load_sales(file_bytes: bytes, source_kind: str) -> pd.DataFrame:
                          .replace({'nan': 'TIDAK ADA DATA', '': 'TIDAK ADA DATA'}))
     else:
         df['PENJUAL'] = 'TIDAK ADA DATA'
+
+    # Nama teknisi: pakai kolom (FINAL) sebagai acuan karena sudah dikoreksi,
+    # jatuh ke kolom NAMA TEKNISI bila kosong.
+    fin = df['NAMA TEKNISI (FINAL)'] if 'NAMA TEKNISI (FINAL)' in df.columns else pd.Series(index=df.index, dtype=object)
+    asli = df['NAMA TEKNISI'] if 'NAMA TEKNISI' in df.columns else pd.Series(index=df.index, dtype=object)
+    tek = fin.fillna(asli)
+    df['TEKNISI'] = (tek.astype(str).str.strip().str.upper()
+                     .replace({'NAN': '', 'NONE': ''}))
+    df.loc[df['TEKNISI'] == '', 'TEKNISI'] = 'TIDAK ADA TEKNISI'
+
+    # tarif bagi hasil (hanya relevan untuk baris berkategori JASA)
+    is_jasa = df['KATEGORI'] == 'JASA'
+    lab_tar = df.loc[is_jasa, 'BARANG'].map(tarif_bagi_hasil)
+    df['TARIF_LABEL'] = None
+    df['TARIF'] = 0.0
+    if len(lab_tar):
+        df.loc[is_jasa, 'TARIF_LABEL'] = [x[0] for x in lab_tar]
+        df.loc[is_jasa, 'TARIF'] = [x[1] for x in lab_tar]
+    df['BAGI_HASIL'] = df['TOTAL HARGA'] * df['TARIF']
+    df['BAGI_HASIL_FLAT'] = 0.0
+    df.loc[is_jasa, 'BAGI_HASIL_FLAT'] = df.loc[is_jasa, 'TOTAL HARGA'] * TARIF_PEMBANDING
     return df
+
+
+# --- aturan bagi hasil jasa teknisi -----------------------------------------
+# Tarif ditentukan dari kata kunci pada NAMA BARANG. Bila satu nama mengandung
+# lebih dari satu kata kunci, yang dipakai adalah "NORMAL" (keputusan pengguna,
+# mis. "JS PROMO LCD 250K - NORMAL" -> 30%, bukan 60%).
+TARIF_BAGI_HASIL = [
+    ('NORMAL', 0.30),        # diperiksa pertama supaya menang saat bentrok
+    ('MATI TOTAL', 0.32),
+    ('INTERFACE', 0.20),
+    ('PROMO', 0.60),
+]
+TARIF_DEFAULT = 0.30         # item jasa tanpa kata kunci (mis. "JASA REPAIR")
+TARIF_PEMBANDING = 0.30      # skema pembanding: seluruh omzet jasa x 30%
+
+
+def tarif_bagi_hasil(nama_barang):
+    """Kembalikan (label, tarif) untuk satu nama barang jasa."""
+    s = str(nama_barang).upper()
+    for kata, tarif in TARIF_BAGI_HASIL:
+        if kata in s:
+            return kata.title(), tarif
+    return 'Lainnya', TARIF_DEFAULT
+
+
+def periode_gaji(bulan_gaji: int, tahun_gaji: int):
+    """Rentang tanggal cutoff untuk satu bulan penggajian.
+
+    Aturan: gaji bulan M dihitung dari 24 bulan (M-2) sampai 23 bulan (M-1).
+    Contoh: gaji Mei 2026 -> 24 Maret 2026 s/d 23 April 2026.
+    """
+    m_akhir = bulan_gaji - 1
+    th_akhir = tahun_gaji
+    if m_akhir < 1:
+        m_akhir += 12
+        th_akhir -= 1
+    m_awal = m_akhir - 1
+    th_awal = th_akhir
+    if m_awal < 1:
+        m_awal += 12
+        th_awal -= 1
+    return (pd.Timestamp(th_awal, m_awal, 24),
+            pd.Timestamp(th_akhir, m_akhir, 23))
+
+
+def label_periode(bulan_gaji: int, tahun_gaji: int):
+    a, b = periode_gaji(bulan_gaji, tahun_gaji)
+    return (f"Gaji {BULAN_NAMES[bulan_gaji]} {tahun_gaji}  "
+            f"({a.day} {BULAN_NAMES[a.month]} – {b.day} {BULAN_NAMES[b.month]} {b.year})")
+
+
+def daftar_periode_gaji(tgl_min, tgl_max):
+    """Semua bulan penggajian yang periodenya beririsan dengan rentang data."""
+    hasil = []
+    if pd.isna(tgl_min) or pd.isna(tgl_max):
+        return hasil
+    y, m = tgl_min.year, tgl_min.month
+    for _ in range(60):
+        # majukan bulan gaji sampai periodenya melewati data
+        a, b = periode_gaji(m, y)
+        if a > tgl_max:
+            break
+        if b >= tgl_min:
+            hasil.append((y, m))
+        m += 1
+        if m > 12:
+            m = 1
+            y += 1
+    return hasil
 
 
 def rp(v, singkat=True):
@@ -660,9 +750,9 @@ if st.session_state.get("ppt_bytes"):
 # ---------------------------------------------------------------------------
 # TABS
 # ---------------------------------------------------------------------------
-tab_main, tab_pending, tab_done, tab_cancel, tab_jual, tab_mlf = st.tabs(
+tab_main, tab_pending, tab_done, tab_cancel, tab_jual, tab_mlf, tab_tek = st.tabs(
     ["📊 Dashboard Utama", "⚠️ Dashboard Pending", "✅ Dashboard Done",
-     "🚫 Dashboard Cancel", "💰 Penjualan", "🎫 Voucher MLF"]
+     "🚫 Dashboard Cancel", "💰 Penjualan", "🎫 Voucher MLF", "🧰 Omzet & Bagi Hasil Teknisi"]
 )
 
 # =============================================================================
@@ -1167,3 +1257,230 @@ with tab_mlf:
                     "(bukan harga satuan). **Laba kotor** = TOTAL HARGA − MODAL, belum "
                     "dikurangi biaya operasional."
                 )
+
+# =============================================================================
+# TAB 7: OMZET & BAGI HASIL TEKNISI
+# =============================================================================
+with tab_tek:
+    st.markdown("## Omzet Jasa & Bagi Hasil per Teknisi")
+
+    if sales.empty:
+        st.info(
+            "Data penjualan belum tersedia. Tambahkan file `data/penjualan.csv.gz` ke repo, "
+            "atau upload lewat panel kiri."
+        )
+    else:
+        jasa_all = sales[sales['KATEGORI'] == 'JASA'].copy()
+        if jasa_all.empty:
+            st.warning("Tidak ada baris berkategori JASA pada data penjualan.")
+        else:
+            # ---------- pemilih periode penggajian (cutoff 24 -> 23) ----------
+            periode_list = daftar_periode_gaji(jasa_all['TGL'].min(), jasa_all['TGL'].max())
+            opsi = ['Semua Periode'] + periode_list
+
+            cpa, cpb = st.columns([2, 1])
+            with cpa:
+                pilih = st.selectbox(
+                    "Periode penggajian (cutoff tanggal 24 s/d 23)",
+                    opsi,
+                    index=len(opsi) - 1 if len(opsi) > 1 else 0,
+                    format_func=lambda x: ("Semua Periode (tanpa cutoff)"
+                                           if isinstance(x, str)
+                                           else label_periode(x[1], x[0])),
+                    key='tek_periode',
+                )
+            with cpb:
+                pakai_cabang = st.checkbox(
+                    "Ikuti filter Cabang di panel kiri", value=True, key='tek_pakai_cab')
+
+            jasa = jasa_all
+            if pakai_cabang and f_cabang != 'Semua Cabang':
+                jasa = jasa[jasa['CABANG'] == f_cabang]
+
+            if isinstance(pilih, str):
+                periode_txt = "Seluruh periode data (tanpa cutoff penggajian)"
+                a = b = None
+            else:
+                a, b = periode_gaji(pilih[1], pilih[0])
+                jasa = jasa[(jasa['TGL'] >= a) & (jasa['TGL'] <= b)]
+                periode_txt = (f"{a.day} {BULAN_NAMES[a.month]} {a.year} – "
+                               f"{b.day} {BULAN_NAMES[b.month]} {b.year}")
+
+            st.caption(f"Rentang data dihitung: **{periode_txt}**"
+                       + ("" if not (pakai_cabang and f_cabang != 'Semua Cabang')
+                          else f" · cabang **{f_cabang}**"))
+
+            if jasa.empty:
+                st.warning("Tidak ada transaksi jasa pada periode/cabang tersebut.")
+            else:
+                omzet_j = jasa['TOTAL HARGA'].sum()
+                bh = jasa['BAGI_HASIL'].sum()
+                bh_flat = jasa['BAGI_HASIL_FLAT'].sum()
+                selisih = bh - bh_flat
+                n_tek = jasa.loc[jasa['TEKNISI'] != 'TIDAK ADA TEKNISI', 'TEKNISI'].nunique()
+
+                # peringatan bila periode ini belum memakai penamaan berkata kunci
+                n_kw = (jasa['TARIF_LABEL'] != 'Lainnya').sum()
+                if n_kw == 0:
+                    st.warning(
+                        "Pada periode ini **tidak ada satu pun item jasa yang mengandung kata "
+                        "kunci** (Interface / Normal / Mati Total / Promo). Semua item memakai "
+                        "penamaan lama seperti `JASA REPAIR`, sehingga seluruhnya kena tarif "
+                        "default 30% — akibatnya hasil skema aturan **sama persis** dengan "
+                        "pembanding flat 30%. Penamaan berkata kunci baru mulai dipakai sekitar "
+                        "Juli 2026."
+                    )
+                elif n_kw < len(jasa) * 0.5:
+                    st.info(
+                        f"Baru **{n_kw:,} dari {len(jasa):,} baris** ({n_kw/len(jasa)*100:.0f}%) "
+                        "yang memakai penamaan berkata kunci; sisanya kena tarif default 30%. "
+                        "Selisih terhadap skema flat masih kecil selama penamaan belum seragam."
+                    )
+
+                st.markdown(kpi_html([
+                    {'label': 'Omzet Jasa', 'value': rp(omzet_j),
+                     'sub': f"{len(jasa):,} baris jasa",
+                     'grad': 'linear-gradient(135deg,#1f3864,#2e5394)'},
+                    {'label': 'Bagi Hasil (Aturan)', 'value': rp(bh),
+                     'sub': f"{(bh/omzet_j*100 if omzet_j else 0):.1f}% dari omzet jasa",
+                     'grad': 'linear-gradient(135deg,#16a34a,#22c55e)'},
+                    {'label': 'Pembanding (Flat 30%)', 'value': rp(bh_flat),
+                     'sub': 'seluruh omzet jasa × 30%',
+                     'grad': 'linear-gradient(135deg,#7c3aed,#a855f7)'},
+                    {'label': 'Selisih', 'value': rp(selisih),
+                     'sub': ('aturan lebih besar' if selisih > 0 else
+                             ('flat lebih besar' if selisih < 0 else 'sama')),
+                     'grad': ('linear-gradient(135deg,#e0921f,#e2b21a)' if selisih >= 0
+                              else 'linear-gradient(135deg,#c9392f,#e0475a)')},
+                    {'label': 'Jumlah Teknisi', 'value': f"{n_tek:,}",
+                     'sub': f"rata-rata {rp(bh/n_tek if n_tek else 0)}/teknisi",
+                     'grad': 'linear-gradient(135deg,#0f8a82,#17a3a3)'},
+                    {'label': 'Tanpa Nama Teknisi', 'value': rp(
+                        jasa.loc[jasa['TEKNISI'] == 'TIDAK ADA TEKNISI', 'TOTAL HARGA'].sum()),
+                     'sub': f"{(jasa['TEKNISI'] == 'TIDAK ADA TEKNISI').sum():,} baris",
+                     'grad': 'linear-gradient(135deg,#64748b,#94a3b8)'},
+                ]), unsafe_allow_html=True)
+                st.write("")
+
+                # ---------- rekap per teknisi ----------
+                gt = jasa.groupby('TEKNISI').agg(
+                    Baris=('TOTAL HARGA', 'size'),
+                    Omzet_Jasa=('TOTAL HARGA', 'sum'),
+                    Bagi_Hasil=('BAGI_HASIL', 'sum'),
+                    Flat_30=('BAGI_HASIL_FLAT', 'sum'))
+                gt['Selisih'] = gt['Bagi_Hasil'] - gt['Flat_30']
+                gt['Efektif %'] = (gt['Bagi_Hasil'] / gt['Omzet_Jasa'] * 100).round(1)
+                gt = gt.sort_values('Bagi_Hasil', ascending=False)
+                gt_show = gt.rename(columns={'Omzet_Jasa': 'Omzet Jasa',
+                                             'Bagi_Hasil': 'Bagi Hasil (Aturan)',
+                                             'Flat_30': 'Pembanding 30%'})
+
+                t1, t2 = st.columns([1.05, 1])
+                with t1:
+                    st.markdown("#### 15 Teknisi — Bagi Hasil Tertinggi")
+                    top = gt[gt.index != 'TIDAK ADA TEKNISI'].head(15).sort_values('Bagi_Hasil')
+                    figt = go.Figure()
+                    figt.add_bar(y=top.index, x=top['Bagi_Hasil'], orientation='h',
+                                 name='Aturan', marker_color='#16a34a')
+                    figt.add_bar(y=top.index, x=top['Flat_30'], orientation='h',
+                                 name='Flat 30%', marker_color='#a855f7')
+                    figt.update_layout(barmode='group', height=520,
+                                       margin=dict(l=10, r=10, t=10, b=10),
+                                       legend=dict(orientation='h', y=1.04),
+                                       xaxis_title='Rupiah')
+                    st.plotly_chart(figt, use_container_width=True, key='tek_fig')
+                with t2:
+                    st.markdown("#### Komposisi Omzet Jasa per Tarif")
+                    gtar = jasa.groupby('TARIF_LABEL').agg(
+                        Baris=('TOTAL HARGA', 'size'),
+                        Omzet=('TOTAL HARGA', 'sum'),
+                        Bagi_Hasil=('BAGI_HASIL', 'sum'))
+                    gtar['Tarif'] = gtar.index.map(
+                        lambda k: dict([(a.title(), b) for a, b in TARIF_BAGI_HASIL]).get(
+                            k, TARIF_DEFAULT))
+                    gtar['Tarif'] = (gtar['Tarif'] * 100).round(0).astype(int).astype(str) + '%'
+                    gtar = gtar.sort_values('Omzet', ascending=False)
+                    st.dataframe(
+                        gtar[['Tarif', 'Baris', 'Omzet', 'Bagi_Hasil']].rename(
+                            columns={'Bagi_Hasil': 'Bagi Hasil'}).style.format(
+                            {'Baris': '{:,.0f}', 'Omzet': 'Rp {:,.0f}',
+                             'Bagi Hasil': 'Rp {:,.0f}'}),
+                        use_container_width=True, key='tek_tarif')
+                    figtar = px.pie(names=gtar.index, values=gtar['Omzet'], hole=0.55,
+                                    color_discrete_sequence=PALETTE)
+                    figtar.update_layout(height=280, margin=dict(l=5, r=5, t=5, b=5),
+                                         legend=dict(font=dict(size=9)))
+                    st.plotly_chart(figtar, use_container_width=True, key='tek_tarif_fig')
+
+                st.markdown("#### Rekap Lengkap per Teknisi")
+                st.dataframe(
+                    gt_show.style.format({
+                        'Baris': '{:,.0f}', 'Omzet Jasa': 'Rp {:,.0f}',
+                        'Bagi Hasil (Aturan)': 'Rp {:,.0f}',
+                        'Pembanding 30%': 'Rp {:,.0f}', 'Selisih': 'Rp {:,.0f}'}),
+                    use_container_width=True, height=460, key='tek_tabel')
+
+                csv_tek = gt_show.reset_index().to_csv(index=False).encode('utf-8-sig')
+                st.download_button(
+                    "⬇️ Unduh rekap teknisi (CSV)", data=csv_tek,
+                    file_name=(f"bagi_hasil_teknisi_"
+                               f"{'semua' if isinstance(pilih, str) else f'{pilih[0]}-{pilih[1]:02d}'}.csv"),
+                    mime="text/csv", key='tek_unduh')
+
+                st.markdown("#### Rekap per Cabang")
+                gcb = jasa.groupby('CABANG').agg(
+                    Teknisi=('TEKNISI', 'nunique'),
+                    Omzet_Jasa=('TOTAL HARGA', 'sum'),
+                    Bagi_Hasil=('BAGI_HASIL', 'sum'),
+                    Flat_30=('BAGI_HASIL_FLAT', 'sum'))
+                gcb['Selisih'] = gcb['Bagi_Hasil'] - gcb['Flat_30']
+                gcb = gcb.sort_values('Omzet_Jasa', ascending=False)
+                st.dataframe(
+                    gcb.rename(columns={'Omzet_Jasa': 'Omzet Jasa',
+                                        'Bagi_Hasil': 'Bagi Hasil (Aturan)',
+                                        'Flat_30': 'Pembanding 30%'}).style.format({
+                        'Teknisi': '{:,.0f}', 'Omzet Jasa': 'Rp {:,.0f}',
+                        'Bagi Hasil (Aturan)': 'Rp {:,.0f}',
+                        'Pembanding 30%': 'Rp {:,.0f}', 'Selisih': 'Rp {:,.0f}'}),
+                    use_container_width=True, height=380, key='tek_cabang')
+
+                st.markdown("#### Detail Transaksi Jasa")
+                qt = st.text_input("Cari teknisi / barang / faktur", key='tek_cari')
+                colt = ['TGL FAKTUR', 'NO FAKTUR', 'CABANG', 'TEKNISI', 'NAMA BARANG',
+                        'TARIF_LABEL', 'TARIF', 'TOTAL HARGA', 'BAGI_HASIL', 'BAGI_HASIL_FLAT']
+                colt = [c for c in colt if c in jasa.columns]
+                dt = jasa[colt].copy()
+                dt = dt.rename(columns={'TARIF_LABEL': 'Kategori Tarif', 'TARIF': 'Tarif',
+                                        'BAGI_HASIL': 'Bagi Hasil',
+                                        'BAGI_HASIL_FLAT': 'Flat 30%'})
+                if qt:
+                    mask = dt.apply(lambda r: qt.upper() in ' '.join(str(v) for v in r.values).upper(), axis=1)
+                    dt = dt[mask]
+                st.caption(f"{len(dt):,} baris ditampilkan (maksimal 1.000).")
+                st.dataframe(dt.head(1000), use_container_width=True, height=360, key='tek_detail')
+
+                with st.expander("ℹ️ Cara perhitungan & catatan"):
+                    st.write(
+                        "**Tarif bagi hasil** ditentukan dari kata kunci pada kolom NAMA BARANG:\n"
+                        "- mengandung **Interface** → 20%\n"
+                        "- mengandung **Normal** → 30%\n"
+                        "- mengandung **Mati Total** → 32%\n"
+                        "- mengandung **Promo** → 60%\n"
+                        "- tidak mengandung kata kunci mana pun → **30%** (sesuai keputusan Anda; "
+                        "ini mencakup item berpola `JASA ...` seperti JASA REPAIR, JASA BATERAI, "
+                        "JASA LCD 50%, yang porsinya justru mayoritas)\n\n"
+                        "Bila satu nama mengandung **dua kata kunci** sekaligus (mis. "
+                        "`JS PROMO LCD 250K - NORMAL`), yang dipakai adalah **Normal 30%**.\n\n"
+                        "**Periode penggajian** memakai cutoff tanggal 24 sampai 23: gaji bulan M "
+                        "dihitung dari 24 bulan (M−2) sampai 23 bulan (M−1). Contoh gaji Mei 2026 "
+                        "= 24 Maret 2026 s/d 23 April 2026. Tanggal acuannya adalah **TGL FAKTUR**.\n\n"
+                        "**Pembanding Flat 30%** = seluruh omzet jasa × 30%, tanpa membedakan jenis "
+                        "pekerjaan. Kolom *Selisih* menunjukkan berapa lebih besar/kecil skema "
+                        "aturan dibanding skema flat.\n\n"
+                        "Nama teknisi diambil dari kolom **NAMA TEKNISI (FINAL)**; bila kosong, "
+                        "dipakai kolom NAMA TEKNISI. Baris yang keduanya kosong dikelompokkan "
+                        "sebagai *TIDAK ADA TEKNISI* dan tetap ditampilkan agar terlihat, tetapi "
+                        "sebaiknya dirapikan di sumber data.\n\n"
+                        "Perhitungan ini memakai **omzet jasa (TOTAL HARGA)**, belum dikurangi "
+                        "biaya apa pun."
+                    )

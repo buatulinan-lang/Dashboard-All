@@ -274,41 +274,46 @@ def load_sales(file_bytes: bytes, source_kind: str) -> pd.DataFrame:
                      .replace({'NAN': '', 'NONE': ''}))
     df.loc[df['TEKNISI'] == '', 'TEKNISI'] = 'TIDAK ADA TEKNISI'
 
-    # tarif bagi hasil (hanya relevan untuk baris berkategori JASA)
+    # Simpan kata kunci yang cocok saja. Tarifnya sengaja TIDAK dihitung di sini
+    # supaya bisa diubah pengguna dari dashboard tanpa memuat ulang data.
     is_jasa = df['KATEGORI'] == 'JASA'
-    lab_tar = df.loc[is_jasa, 'BARANG'].map(tarif_bagi_hasil)
-    df['TARIF_LABEL'] = None
-    df['TARIF'] = 0.0
-    if len(lab_tar):
-        df.loc[is_jasa, 'TARIF_LABEL'] = [x[0] for x in lab_tar]
-        df.loc[is_jasa, 'TARIF'] = [x[1] for x in lab_tar]
-    df['BAGI_HASIL'] = df['TOTAL HARGA'] * df['TARIF']
-    df['BAGI_HASIL_FLAT'] = 0.0
-    df.loc[is_jasa, 'BAGI_HASIL_FLAT'] = df.loc[is_jasa, 'TOTAL HARGA'] * TARIF_PEMBANDING
+    df['KW_MATCH'] = ''
+    if is_jasa.any():
+        df.loc[is_jasa, 'KW_MATCH'] = (df.loc[is_jasa, 'BARANG']
+                                       .map(lambda s: '|'.join(cocok_kata_kunci(s))))
     return df
 
 
 # --- aturan bagi hasil jasa teknisi -----------------------------------------
-# Tarif ditentukan dari kata kunci pada NAMA BARANG. Bila satu nama mengandung
-# lebih dari satu kata kunci, yang dipakai adalah "NORMAL" (keputusan pengguna,
-# mis. "JS PROMO LCD 250K - NORMAL" -> 30%, bukan 60%).
-TARIF_BAGI_HASIL = [
-    ('NORMAL', 0.30),        # diperiksa pertama supaya menang saat bentrok
-    ('MATI TOTAL', 0.32),
-    ('INTERFACE', 0.20),
-    ('PROMO', 0.60),
-]
-TARIF_DEFAULT = 0.30         # item jasa tanpa kata kunci (mis. "JASA REPAIR")
-TARIF_PEMBANDING = 0.30      # skema pembanding: seluruh omzet jasa x 30%
+# Tarif ditentukan dari kata kunci pada NAMA BARANG. Semua angka di bawah hanya
+# NILAI AWAL — pengguna bisa mengubahnya langsung dari tab dashboard.
+KATA_KUNCI_TARIF = ['INTERFACE', 'NORMAL', 'MATI TOTAL', 'PROMO']
+TARIF_AWAL = {
+    'Interface': 20.0,
+    'Normal': 30.0,
+    'Mati Total': 32.0,
+    'Promo': 60.0,
+}
+TARIF_DEFAULT_AWAL = 30.0     # item jasa tanpa kata kunci (mis. "JASA REPAIR")
+TARIF_PEMBANDING_AWAL = 30.0  # skema pembanding: seluruh omzet jasa x tarif ini
+LABEL_LAINNYA = 'Lainnya'
 
 
-def tarif_bagi_hasil(nama_barang):
-    """Kembalikan (label, tarif) untuk satu nama barang jasa."""
+def cocok_kata_kunci(nama_barang):
+    """Daftar kata kunci yang terkandung di satu nama barang (urut tetap)."""
     s = str(nama_barang).upper()
-    for kata, tarif in TARIF_BAGI_HASIL:
-        if kata in s:
-            return kata.title(), tarif
-    return 'Lainnya', TARIF_DEFAULT
+    return [k for k in KATA_KUNCI_TARIF if k in s]
+
+
+def pilih_label_tarif(kw_str, urutan):
+    """Tentukan label tarif dari kata kunci yang cocok, mengikuti urutan prioritas."""
+    if not kw_str:
+        return LABEL_LAINNYA
+    cocok = kw_str.split('|')
+    for k in urutan:
+        if k in cocok:
+            return k.title()
+    return cocok[0].title()
 
 
 def periode_gaji(bulan_gaji: int, tahun_gaji: int):
@@ -1274,6 +1279,80 @@ with tab_tek:
         if jasa_all.empty:
             st.warning("Tidak ada baris berkategori JASA pada data penjualan.")
         else:
+            # ---------- pengaturan tarif (bisa diubah manual) ----------
+            with st.expander("⚙️ Pengaturan Tarif Bagi Hasil — klik untuk mengubah",
+                             expanded=False):
+                st.caption(
+                    "Ubah angka di bawah sesuai kebijakan yang berlaku. Semua perhitungan, "
+                    "tabel, dan grafik di tab ini langsung menyesuaikan."
+                )
+                ca, cb, cc, cd = st.columns(4)
+                tarif_input = {}
+                with ca:
+                    tarif_input['Interface'] = st.number_input(
+                        "Interface (%)", min_value=0.0, max_value=100.0,
+                        value=TARIF_AWAL['Interface'], step=1.0, key='tar_int')
+                with cb:
+                    tarif_input['Normal'] = st.number_input(
+                        "Normal (%)", min_value=0.0, max_value=100.0,
+                        value=TARIF_AWAL['Normal'], step=1.0, key='tar_nor')
+                with cc:
+                    tarif_input['Mati Total'] = st.number_input(
+                        "Mati Total (%)", min_value=0.0, max_value=100.0,
+                        value=TARIF_AWAL['Mati Total'], step=1.0, key='tar_mat')
+                with cd:
+                    tarif_input['Promo'] = st.number_input(
+                        "Promo (%)", min_value=0.0, max_value=100.0,
+                        value=TARIF_AWAL['Promo'], step=1.0, key='tar_pro')
+
+                ce, cf, cg = st.columns([1, 1, 1.6])
+                with ce:
+                    tarif_lain = st.number_input(
+                        "Tanpa kata kunci (%)", min_value=0.0, max_value=100.0,
+                        value=TARIF_DEFAULT_AWAL, step=1.0, key='tar_lain',
+                        help="Dipakai untuk item seperti JASA REPAIR, JASA BATERAI, "
+                             "JASA LCD 50% yang tidak mengandung kata kunci mana pun.")
+                with cf:
+                    tarif_flat = st.number_input(
+                        "Tarif pembanding (%)", min_value=0.0, max_value=100.0,
+                        value=TARIF_PEMBANDING_AWAL, step=1.0, key='tar_flat',
+                        help="Skema pembanding: seluruh omzet jasa dikali tarif ini.")
+                with cg:
+                    prioritas = st.selectbox(
+                        "Kalau satu nama mengandung 2 kata kunci, yang menang:",
+                        ['Normal', 'Promo', 'Mati Total', 'Interface'],
+                        index=0, key='tar_prio',
+                        help="Contoh kasus: 'JS PROMO LCD 250K - NORMAL' mengandung "
+                             "Promo dan Normal sekaligus.")
+
+                if st.button("↩️ Kembalikan ke tarif awal", key='tar_reset'):
+                    for k, v in [('tar_int', 'Interface'), ('tar_nor', 'Normal'),
+                                 ('tar_mat', 'Mati Total'), ('tar_pro', 'Promo')]:
+                        st.session_state[k] = TARIF_AWAL[v]
+                    st.session_state['tar_lain'] = TARIF_DEFAULT_AWAL
+                    st.session_state['tar_flat'] = TARIF_PEMBANDING_AWAL
+                    st.session_state['tar_prio'] = 'Normal'
+                    st.rerun()
+
+            # urutan prioritas: pilihan pengguna didahulukan, sisanya menyusul
+            urutan = [prioritas.upper()] + [k for k in KATA_KUNCI_TARIF
+                                            if k != prioritas.upper()]
+            peta_tarif = {k: v / 100.0 for k, v in tarif_input.items()}
+            peta_tarif[LABEL_LAINNYA] = tarif_lain / 100.0
+
+            # hitung ulang label & nilai bagi hasil berdasarkan input di atas
+            jasa_all['TARIF_LABEL'] = jasa_all['KW_MATCH'].map(
+                lambda s: pilih_label_tarif(s, urutan))
+            jasa_all['TARIF'] = jasa_all['TARIF_LABEL'].map(peta_tarif).fillna(0.0)
+            jasa_all['BAGI_HASIL'] = jasa_all['TOTAL HARGA'] * jasa_all['TARIF']
+            jasa_all['BAGI_HASIL_FLAT'] = jasa_all['TOTAL HARGA'] * (tarif_flat / 100.0)
+
+            ringkas_tarif = " · ".join(
+                f"{k} {v:.0f}%" for k, v in list(tarif_input.items()) +
+                [('Lainnya', tarif_lain)])
+            st.caption(f"**Tarif aktif:** {ringkas_tarif}  ·  "
+                       f"pembanding flat {tarif_flat:.0f}%  ·  prioritas bentrok: {prioritas}")
+
             # ---------- pemilih periode penggajian (cutoff 24 -> 23) ----------
             periode_list = daftar_periode_gaji(jasa_all['TGL'].min(), jasa_all['TGL'].max())
             opsi = ['Semua Periode'] + periode_list
@@ -1322,13 +1401,15 @@ with tab_tek:
                 # peringatan bila periode ini belum memakai penamaan berkata kunci
                 n_kw = (jasa['TARIF_LABEL'] != 'Lainnya').sum()
                 if n_kw == 0:
+                    sama = abs(tarif_lain - tarif_flat) < 1e-9
                     st.warning(
                         "Pada periode ini **tidak ada satu pun item jasa yang mengandung kata "
                         "kunci** (Interface / Normal / Mati Total / Promo). Semua item memakai "
                         "penamaan lama seperti `JASA REPAIR`, sehingga seluruhnya kena tarif "
-                        "default 30% — akibatnya hasil skema aturan **sama persis** dengan "
-                        "pembanding flat 30%. Penamaan berkata kunci baru mulai dipakai sekitar "
-                        "Juli 2026."
+                        f"tanpa-kata-kunci **{tarif_lain:.0f}%**"
+                        + (f" — dan karena tarif pembanding juga {tarif_flat:.0f}%, kedua skema "
+                           "menghasilkan angka **sama persis**." if sama else ".")
+                        + " Penamaan berkata kunci baru mulai dipakai sekitar Juli 2026."
                     )
                 elif n_kw < len(jasa) * 0.5:
                     st.info(
@@ -1344,8 +1425,8 @@ with tab_tek:
                     {'label': 'Bagi Hasil (Aturan)', 'value': rp(bh),
                      'sub': f"{(bh/omzet_j*100 if omzet_j else 0):.1f}% dari omzet jasa",
                      'grad': 'linear-gradient(135deg,#16a34a,#22c55e)'},
-                    {'label': 'Pembanding (Flat 30%)', 'value': rp(bh_flat),
-                     'sub': 'seluruh omzet jasa × 30%',
+                    {'label': f'Pembanding (Flat {tarif_flat:.0f}%)', 'value': rp(bh_flat),
+                     'sub': f'seluruh omzet jasa × {tarif_flat:.0f}%',
                      'grad': 'linear-gradient(135deg,#7c3aed,#a855f7)'},
                     {'label': 'Selisih', 'value': rp(selisih),
                      'sub': ('aturan lebih besar' if selisih > 0 else
@@ -1371,9 +1452,10 @@ with tab_tek:
                 gt['Selisih'] = gt['Bagi_Hasil'] - gt['Flat_30']
                 gt['Efektif %'] = (gt['Bagi_Hasil'] / gt['Omzet_Jasa'] * 100).round(1)
                 gt = gt.sort_values('Bagi_Hasil', ascending=False)
+                lbl_flat = f'Pembanding {tarif_flat:.0f}%'
                 gt_show = gt.rename(columns={'Omzet_Jasa': 'Omzet Jasa',
                                              'Bagi_Hasil': 'Bagi Hasil (Aturan)',
-                                             'Flat_30': 'Pembanding 30%'})
+                                             'Flat_30': lbl_flat})
 
                 t1, t2 = st.columns([1.05, 1])
                 with t1:
@@ -1383,7 +1465,7 @@ with tab_tek:
                     figt.add_bar(y=top.index, x=top['Bagi_Hasil'], orientation='h',
                                  name='Aturan', marker_color='#16a34a')
                     figt.add_bar(y=top.index, x=top['Flat_30'], orientation='h',
-                                 name='Flat 30%', marker_color='#a855f7')
+                                 name=f'Flat {tarif_flat:.0f}%', marker_color='#a855f7')
                     figt.update_layout(barmode='group', height=520,
                                        margin=dict(l=10, r=10, t=10, b=10),
                                        legend=dict(orientation='h', y=1.04),
@@ -1396,9 +1478,8 @@ with tab_tek:
                         Omzet=('TOTAL HARGA', 'sum'),
                         Bagi_Hasil=('BAGI_HASIL', 'sum'))
                     gtar['Tarif'] = gtar.index.map(
-                        lambda k: dict([(a.title(), b) for a, b in TARIF_BAGI_HASIL]).get(
-                            k, TARIF_DEFAULT))
-                    gtar['Tarif'] = (gtar['Tarif'] * 100).round(0).astype(int).astype(str) + '%'
+                        lambda k: peta_tarif.get(k, 0.0) * 100)
+                    gtar['Tarif'] = gtar['Tarif'].round(1).astype(str) + '%'
                     gtar = gtar.sort_values('Omzet', ascending=False)
                     st.dataframe(
                         gtar[['Tarif', 'Baris', 'Omzet', 'Bagi_Hasil']].rename(
@@ -1417,7 +1498,7 @@ with tab_tek:
                     gt_show.style.format({
                         'Baris': '{:,.0f}', 'Omzet Jasa': 'Rp {:,.0f}',
                         'Bagi Hasil (Aturan)': 'Rp {:,.0f}',
-                        'Pembanding 30%': 'Rp {:,.0f}', 'Selisih': 'Rp {:,.0f}'}),
+                        lbl_flat: 'Rp {:,.0f}', 'Selisih': 'Rp {:,.0f}'}),
                     use_container_width=True, height=460, key='tek_tabel')
 
                 csv_tek = gt_show.reset_index().to_csv(index=False).encode('utf-8-sig')
@@ -1438,10 +1519,10 @@ with tab_tek:
                 st.dataframe(
                     gcb.rename(columns={'Omzet_Jasa': 'Omzet Jasa',
                                         'Bagi_Hasil': 'Bagi Hasil (Aturan)',
-                                        'Flat_30': 'Pembanding 30%'}).style.format({
+                                        'Flat_30': lbl_flat}).style.format({
                         'Teknisi': '{:,.0f}', 'Omzet Jasa': 'Rp {:,.0f}',
                         'Bagi Hasil (Aturan)': 'Rp {:,.0f}',
-                        'Pembanding 30%': 'Rp {:,.0f}', 'Selisih': 'Rp {:,.0f}'}),
+                        lbl_flat: 'Rp {:,.0f}', 'Selisih': 'Rp {:,.0f}'}),
                     use_container_width=True, height=380, key='tek_cabang')
 
                 st.markdown("#### Detail Transaksi Jasa")
@@ -1452,7 +1533,7 @@ with tab_tek:
                 dt = jasa[colt].copy()
                 dt = dt.rename(columns={'TARIF_LABEL': 'Kategori Tarif', 'TARIF': 'Tarif',
                                         'BAGI_HASIL': 'Bagi Hasil',
-                                        'BAGI_HASIL_FLAT': 'Flat 30%'})
+                                        'BAGI_HASIL_FLAT': f'Flat {tarif_flat:.0f}%'})
                 if qt:
                     mask = dt.apply(lambda r: qt.upper() in ' '.join(str(v) for v in r.values).upper(), axis=1)
                     dt = dt[mask]
@@ -1461,20 +1542,22 @@ with tab_tek:
 
                 with st.expander("ℹ️ Cara perhitungan & catatan"):
                     st.write(
-                        "**Tarif bagi hasil** ditentukan dari kata kunci pada kolom NAMA BARANG:\n"
-                        "- mengandung **Interface** → 20%\n"
-                        "- mengandung **Normal** → 30%\n"
-                        "- mengandung **Mati Total** → 32%\n"
-                        "- mengandung **Promo** → 60%\n"
-                        "- tidak mengandung kata kunci mana pun → **30%** (sesuai keputusan Anda; "
-                        "ini mencakup item berpola `JASA ...` seperti JASA REPAIR, JASA BATERAI, "
+                        "**Tarif bagi hasil** ditentukan dari kata kunci pada kolom NAMA BARANG. "
+                        "Angka di bawah ini mengikuti isian pada panel **Pengaturan Tarif** di atas:\n"
+                        f"- mengandung **Interface** → {tarif_input['Interface']:.0f}%\n"
+                        f"- mengandung **Normal** → {tarif_input['Normal']:.0f}%\n"
+                        f"- mengandung **Mati Total** → {tarif_input['Mati Total']:.0f}%\n"
+                        f"- mengandung **Promo** → {tarif_input['Promo']:.0f}%\n"
+                        f"- tidak mengandung kata kunci mana pun → **{tarif_lain:.0f}%** "
+                        "(mencakup item berpola `JASA ...` seperti JASA REPAIR, JASA BATERAI, "
                         "JASA LCD 50%, yang porsinya justru mayoritas)\n\n"
                         "Bila satu nama mengandung **dua kata kunci** sekaligus (mis. "
-                        "`JS PROMO LCD 250K - NORMAL`), yang dipakai adalah **Normal 30%**.\n\n"
+                        f"`JS PROMO LCD 250K - NORMAL`), yang dipakai adalah **{prioritas} "
+                        f"{tarif_input[prioritas]:.0f}%** sesuai pilihan prioritas.\n\n"
                         "**Periode penggajian** memakai cutoff tanggal 24 sampai 23: gaji bulan M "
                         "dihitung dari 24 bulan (M−2) sampai 23 bulan (M−1). Contoh gaji Mei 2026 "
                         "= 24 Maret 2026 s/d 23 April 2026. Tanggal acuannya adalah **TGL FAKTUR**.\n\n"
-                        "**Pembanding Flat 30%** = seluruh omzet jasa × 30%, tanpa membedakan jenis "
+                        f"**Pembanding Flat {tarif_flat:.0f}%** = seluruh omzet jasa × {tarif_flat:.0f}%, tanpa membedakan jenis "
                         "pekerjaan. Kolom *Selisih* menunjukkan berapa lebih besar/kecil skema "
                         "aturan dibanding skema flat.\n\n"
                         "Nama teknisi diambil dari kolom **NAMA TEKNISI (FINAL)**; bila kosong, "

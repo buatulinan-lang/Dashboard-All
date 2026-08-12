@@ -775,6 +775,165 @@ def _slide_hari_tertinggi(prs, d, meta):
     return s
 
 
+def _slide_banding_bulan(prs, d, sf, meta):
+    """Bandingkan bulan berjalan vs bulan sebelumnya secara setara.
+
+    Bulan berjalan biasanya belum penuh, jadi bulan sebelumnya ikut dipotong
+    pada tanggal yang sama (proporsi hari yang sama) agar adil. Rata-rata
+    harian tetap ditampilkan sebagai pembanding kedua.
+    """
+    s = prs.slides.add_slide(prs.slide_layouts[6])
+    _bg_image(s, prs)
+    _logos(s)
+    _title(s, "Bulan Berjalan vs Bulan Sebelumnya")
+
+    tgl = d["TGL PENGIRIMAN"].dropna() if d is not None and not d.empty else pd.Series(dtype='datetime64[ns]')
+    if tgl.empty:
+        _text(s, 0.62, 3.0, 12.1, 0.5, "Data tanggal tidak tersedia.",
+              size=16, color=MUTED, align=PP_ALIGN.CENTER)
+        _footer(s, meta["footer"])
+        return s
+
+    tmax = tgl.max()
+    th, bl = tmax.year, tmax.month
+
+    # Hari terakhir sering belum lengkap (data ditarik di tengah hari). Kalau
+    # volumenya jauh di bawah kebiasaan, hari itu dibuang supaya tidak menyeret
+    # turun angka bulan berjalan.
+    _hb = tgl[(tgl.dt.year == th) & (tgl.dt.month == bl)].dt.day.value_counts().sort_index()
+    hari_n = int(tmax.day)
+    hari_dibuang = None
+    if len(_hb) >= 3 and _hb.get(hari_n, 0) < 0.4 * _hb.iloc[:-1].median():
+        hari_dibuang = hari_n
+        hari_n -= 1
+
+    bl_prev, th_prev = (bl - 1, th) if bl > 1 else (12, th - 1)
+
+    def potong(df, kol, bulan, tahun):
+        t = df[kol]
+        return df[(t.dt.year == tahun) & (t.dt.month == bulan) & (t.dt.day <= hari_n)]
+
+    cur = potong(d, "TGL PENGIRIMAN", bl, th)
+    prev = potong(d, "TGL PENGIRIMAN", bl_prev, th_prev)
+
+    def stat(x):
+        if x.empty:
+            return dict(total=0, done=0, cancel=0, pending=0)
+        vc = x["STATUS_BUCKET"].value_counts()
+        return dict(total=len(x), done=int(vc.get("DONE", 0)),
+                    cancel=int(vc.get("CANCEL", 0)), pending=int(vc.get("PENDING", 0)))
+
+    a, b = stat(prev), stat(cur)
+
+    nama_ini = f"{BULAN_NAMES[bl]} {th}"
+    nama_lalu = f"{BULAN_NAMES[bl_prev]} {th_prev}"
+    _text(s, 1.06, 0.94, 11.6, 0.32,
+          f"Dibandingkan setara: tanggal 1–{hari_n} pada kedua bulan "
+          f"({nama_lalu} vs {nama_ini})", size=12, color=MUTED)
+
+    def delta(baru, lama):
+        if not lama:
+            return "—", MUTED
+        p = (baru - lama) / lama * 100
+        warna = GREEN_B if p > 0 else (RED if p < 0 else MUTED)
+        return f"{'+' if p > 0 else ''}{dec(p)}%", warna
+
+    dt_total, w_total = delta(b["total"], a["total"])
+    dt_done, w_done = delta(b["done"], a["done"])
+    dt_cancel, w_cancel = delta(b["cancel"], a["cancel"])
+
+    kartu = [
+        {"label": f"TRANSAKSI 1–{hari_n}", "value": nf(b["total"]),
+         "sub": f"{nama_lalu}: {nf(a['total'])}  ({dt_total})",
+         "fill": NAVY, "text": WHITE, "subcolor": RGBColor(0xC7, 0xD3, 0xEA)},
+        {"label": "SELESAI (DONE)", "value": nf(b["done"]),
+         "sub": f"{nama_lalu}: {nf(a['done'])}  ({dt_done})",
+         "fill": GREEN_B, "text": WHITE, "subcolor": RGBColor(0xDC, 0xF3, 0xE3)},
+        {"label": "BATAL (CANCEL)", "value": nf(b["cancel"]),
+         "sub": f"{nama_lalu}: {nf(a['cancel'])}  ({dt_cancel})",
+         "fill": RED, "text": WHITE, "subcolor": RGBColor(0xF7, 0xDE, 0xDB)},
+        {"label": "RATA-RATA / HARI", "value": dec(b["total"] / hari_n if hari_n else 0),
+         "sub": f"{nama_lalu}: {dec(a['total'] / hari_n if hari_n else 0)}",
+         "fill": BLUE, "text": WHITE, "subcolor": RGBColor(0xD9, 0xEE, 0xF9)},
+    ]
+
+    # tambah omzet & laba bila data penjualan tersedia
+    om_a = om_b = lb_a = lb_b = None
+    if sf is not None and not sf.empty and "TGL" in sf.columns:
+        scur = potong(sf, "TGL", bl, th)
+        sprev = potong(sf, "TGL", bl_prev, th_prev)
+        om_a, om_b = sprev["TOTAL HARGA"].sum(), scur["TOTAL HARGA"].sum()
+        lb_a, lb_b = sprev["LABA"].sum(), scur["LABA"].sum()
+        dt_om, _ = delta(om_b, om_a)
+        dt_lb, _ = delta(lb_b, lb_a)
+        kartu.append({"label": "OMZET", "value": rp(om_b),
+                      "sub": f"{nama_lalu}: {rp(om_a)}  ({dt_om})",
+                      "fill": RGBColor(0x7C, 0x3A, 0xED), "text": WHITE,
+                      "subcolor": RGBColor(0xE4, 0xD9, 0xFA)})
+        kartu.append({"label": "LABA KOTOR", "value": rp(lb_b),
+                      "sub": f"{nama_lalu}: {rp(lb_a)}  ({dt_lb})",
+                      "fill": ORANGE, "text": WHITE,
+                      "subcolor": RGBColor(0xFB, 0xEC, 0xD5)})
+
+    _kpi_row(s, kartu, y=1.5, h=1.35)
+
+    # Grafik perbandingan status — Pending sengaja TIDAK disertakan karena
+    # angkanya kondisi terkini, bukan kejadian pada bulan itu: pendingan bulan
+    # lalu sebagian sudah tuntas sehingga tampak selalu jauh lebih kecil.
+    cd = CategoryChartData()
+    cd.categories = ["Total", "Done", "Cancel"]
+    cd.add_series(nama_lalu, [a["total"], a["done"], a["cancel"]])
+    cd.add_series(nama_ini, [b["total"], b["done"], b["cancel"]])
+    gf = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, In(0.62), In(3.15),
+                            In(6.6), In(3.2), cd)
+    ch = gf.chart
+    _style_chart(ch, title=f"Perbandingan status (tanggal 1–{hari_n})",
+                 show_legend=True, legend_pos=XL_LEGEND_POSITION.TOP,
+                 colors=[RGBColor(0xA9, 0xB6, 0xD8), NAVY], cat_size=10,
+                 val_max=int(max(a["total"], b["total"]) * 1.25) + 1)
+
+    # grafik harian kumulatif
+    def harian(x, kol):
+        if x.empty:
+            return [0] * hari_n
+        g = x.groupby(x[kol].dt.day).size()
+        return [int(g.get(i, 0)) for i in range(1, hari_n + 1)]
+
+    cd2 = CategoryChartData()
+    cd2.categories = [str(i) for i in range(1, hari_n + 1)]
+    cd2.add_series(nama_lalu, harian(prev, "TGL PENGIRIMAN"))
+    cd2.add_series(nama_ini, harian(cur, "TGL PENGIRIMAN"))
+    gf2 = s.shapes.add_chart(XL_CHART_TYPE.LINE, In(7.45), In(3.15), In(5.27), In(3.2), cd2)
+    ch2 = gf2.chart
+    _style_chart(ch2, title="Transaksi harian (tanggal 1–%d)" % hari_n,
+                 show_legend=True, legend_pos=XL_LEGEND_POSITION.TOP,
+                 show_labels=False, cat_size=7)
+    for i, col in enumerate([RGBColor(0xA9, 0xB6, 0xD8), NAVY]):
+        ch2.series[i].format.line.color.rgb = col
+        ch2.series[i].format.line.width = Pt(2)
+        ch2.series[i].smooth = False
+
+    # catatan bawah
+    hari_penuh = calendar.monthrange(th_prev, bl_prev)[1]
+    proyeksi = ""
+    if hari_n < calendar.monthrange(th, bl)[1] and b["total"]:
+        proy = b["total"] / hari_n * calendar.monthrange(th, bl)[1]
+        proyeksi = (f" Bila laju bertahan, {nama_ini} diperkirakan menutup di sekitar "
+                    f"{nf(round(proy))} transaksi.")
+    buang = ""
+    if hari_dibuang:
+        buang = (f" Tanggal {hari_dibuang} dikecualikan karena datanya belum lengkap "
+                 f"sehari penuh.")
+    _text(s, 0.62, 6.62, 12.1, 0.34,
+          "Pending tidak ikut dibandingkan: angkanya kondisi terkini, bukan kejadian "
+          "bulan tersebut — pendingan bulan lalu sebagian sudah tuntas sehingga selalu "
+          "tampak jauh lebih kecil.", size=9.5, color=RGBColor(0x7A, 0x5B, 0x18))
+    _footer(s, f"{nama_ini} baru berjalan {hari_n} hari, sehingga {nama_lalu} "
+               f"(sebenarnya {hari_penuh} hari) ikut dipotong sampai tanggal {hari_n} "
+               f"agar perbandingannya setara.{buang}{proyeksi}")
+    return s
+
+
 def _slide_penjualan(prs, sf, meta):
     """Rekap penjualan: omzet, modal (harga beli), dan laba kotor."""
     s = prs.slides.add_slide(prs.slide_layouts[6])
@@ -1089,11 +1248,12 @@ def _slide_penutup(prs, meta):
 # =====================================================================
 def build_deck(df_filtered, *, total_unique_all, total_raw_rows,
                f_tahun="Semua Tahun", f_bulan="Semua Bulan", f_cabang="Semua Cabang",
-               penyusun="", sertakan=("ringkasan", "status", "harian", "hari_tertinggi",
-                                       "cabang", "pending", "done", "cancel",
-                                       "penjualan", "mlf", "bagihasil", "penutup"),
+               penyusun="", sertakan=("ringkasan", "status", "banding_bulan", "harian",
+                                       "hari_tertinggi", "cabang", "pending", "done",
+                                       "cancel", "penjualan", "mlf", "bagihasil",
+                                       "penutup"),
                sales_filtered=None, tarif_map=None, tarif_flat=30.0,
-               prioritas="Normal", periode_bagihasil=None):
+               prioritas="Normal", periode_bagihasil=None, tahun_fokus="auto"):
     """Bangun deck presentasi.
 
     Parameter tambahan:
@@ -1105,13 +1265,32 @@ def build_deck(df_filtered, *, total_unique_all, total_raw_rows,
       tarif_flat      : tarif pembanding (persen)
       prioritas       : kata kunci yang menang bila satu nama mengandung dua
       periode_bagihasil : (tahun, bulan_gaji) untuk cutoff 24->23; None = ikut filter
+      tahun_fokus     : batasi seluruh isi deck ke satu tahun. "auto" (bawaan)
+                        memakai tahun terbaru yang ada di data; None = tanpa batas.
     """
-    """Bangun deck dari data yang sudah difilter; kembalikan bytes .pptx."""
+    d = df_filtered
+
+    # --- batasi ke satu tahun saja (bawaan: tahun terbaru, mis. 2026) ---
+    if tahun_fokus is not None and not d.empty and d["TAHUN"].notna().any():
+        if tahun_fokus == "auto":
+            tahun_fokus = int(d["TAHUN"].dropna().max())
+        else:
+            tahun_fokus = int(tahun_fokus)
+        d = d[d["TAHUN"] == tahun_fokus]
+        if f_tahun == "Semua Tahun":
+            f_tahun = tahun_fokus
+        if sales_filtered is not None and not sales_filtered.empty:
+            _st = sales_filtered
+            if "TAHUN" in _st.columns:
+                sales_filtered = _st[_st["TAHUN"] == tahun_fokus]
+            elif "TGL FAKTUR" in _st.columns:
+                _tg = pd.to_datetime(_st["TGL FAKTUR"], errors="coerce")
+                sales_filtered = _st[_tg.dt.year == tahun_fokus]
+
     prs = Presentation()
     prs.slide_width = In(13.333)
     prs.slide_height = In(7.5)
 
-    d = df_filtered
     total = len(d)
     vc = d["STATUS_BUCKET"].value_counts()
     done = int(vc.get("DONE", 0))
@@ -1216,6 +1395,18 @@ def build_deck(df_filtered, *, total_unique_all, total_raw_rows,
         _slide_ringkasan(prs, d, meta)
     if "status" in sertakan:
         _slide_status(prs, d, meta)
+    if "banding_bulan" in sertakan:
+        _sf_bd = sales_filtered
+        if _sf_bd is not None and not _sf_bd.empty:
+            _sf_bd = _sf_bd.copy()
+            if "TGL" not in _sf_bd.columns:
+                _sf_bd["TGL"] = pd.to_datetime(_sf_bd["TGL FAKTUR"], errors="coerce")
+            if "MODAL" not in _sf_bd.columns:
+                _sf_bd["MODAL"] = pd.to_numeric(_sf_bd.get("HARGA BELI", 0),
+                                                errors="coerce").fillna(0)
+            if "LABA" not in _sf_bd.columns:
+                _sf_bd["LABA"] = _sf_bd["TOTAL HARGA"] - _sf_bd["MODAL"]
+        _slide_banding_bulan(prs, d, _sf_bd, meta)
     if "harian" in sertakan:
         _slide_harian(prs, d, meta)
     if "hari_tertinggi" in sertakan:

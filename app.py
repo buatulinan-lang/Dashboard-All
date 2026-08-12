@@ -676,6 +676,7 @@ _penyusun = st.sidebar.text_input(
 _SLIDE_LABELS = {
     "ringkasan": "Ringkasan Kinerja",
     "status": "Komposisi Status",
+    "banding_bulan": "Bulan Ini vs Bulan Lalu",
     "harian": "Rekap Transaksi Harian",
     "hari_tertinggi": "Hari Transaksi Tertinggi",
     "cabang": "Kinerja per Cabang",

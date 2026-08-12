@@ -296,6 +296,44 @@ def _jenis_pending(s):
     return "Umum"
 
 
+def rp(v, singkat=True):
+    """Format rupiah ringkas: 1,2 M / 340,5 jt / 12.500."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return "-"
+    neg, v = v < 0, abs(float(v))
+    if singkat:
+        if v >= 1_000_000_000:
+            s = f"Rp {v/1_000_000_000:,.2f} M"
+        elif v >= 1_000_000:
+            s = f"Rp {v/1_000_000:,.1f} jt"
+        elif v >= 1_000:
+            s = f"Rp {v/1_000:,.0f} rb"
+        else:
+            s = f"Rp {v:,.0f}"
+    else:
+        s = f"Rp {v:,.0f}"
+    s = s.replace(",", "#").replace(".", ",").replace("#", ".")
+    return ("-" + s) if neg else s
+
+
+KATA_KUNCI_TARIF = ['INTERFACE', 'NORMAL', 'MATI TOTAL', 'PROMO']
+TARIF_AWAL_PPT = {'Interface': 20.0, 'Normal': 30.0, 'Mati Total': 32.0, 'Promo': 60.0}
+
+
+def _label_tarif(nama_barang, prioritas='NORMAL'):
+    s = str(nama_barang).upper()
+    cocok = [k for k in KATA_KUNCI_TARIF if k in s]
+    if not cocok:
+        return 'Lainnya'
+    urutan = [prioritas] + [k for k in KATA_KUNCI_TARIF if k != prioritas]
+    for k in urutan:
+        if k in cocok:
+            return k.title()
+    return cocok[0].title()
+
+
 def _jenis_cancel(s):
     s = str(s).upper() if pd.notna(s) else ""
     if "DIAMBIL" in s:
@@ -737,6 +775,289 @@ def _slide_hari_tertinggi(prs, d, meta):
     return s
 
 
+def _slide_penjualan(prs, sf, meta):
+    """Rekap penjualan: omzet, modal (harga beli), dan laba kotor."""
+    s = prs.slides.add_slide(prs.slide_layouts[6])
+    _bg_image(s, prs)
+    _logos(s)
+    _title(s, "Penjualan — Modal, Omzet & Laba")
+
+    if sf is None or sf.empty:
+        _text(s, 1.06, 0.94, 11.6, 0.3, meta["subjudul"], size=12, color=MUTED)
+        _text(s, 0.62, 3.0, 12.1, 0.5,
+              "Tidak ada data penjualan pada periode/cabang ini.",
+              size=16, color=MUTED, align=PP_ALIGN.CENTER)
+        _footer(s, meta["footer"])
+        return s
+
+    omzet = sf['TOTAL HARGA'].sum()
+    modal = sf['MODAL'].sum()
+    laba = sf['LABA'].sum()
+    margin = (laba / omzet * 100) if omzet else 0
+    n_faktur = sf['NO FAKTUR'].nunique()
+    qty = sf['QTY'].sum()
+
+    _text(s, 1.06, 0.94, 11.6, 0.3,
+          f"{meta['subjudul']} · {nf(n_faktur)} faktur · {nf(qty)} unit terjual",
+          size=12, color=MUTED)
+
+    _kpi_row(s, [
+        {"label": "OMZET (HARGA JUAL)", "value": rp(omzet), "sub": f"{nf(len(sf))} baris",
+         "fill": NAVY, "text": WHITE, "subcolor": RGBColor(0xC7, 0xD3, 0xEA)},
+        {"label": "MODAL (HARGA BELI)", "value": rp(modal),
+         "sub": f"{dec(modal/omzet*100 if omzet else 0)}% dari omzet",
+         "fill": RED, "text": WHITE, "subcolor": RGBColor(0xF7, 0xDE, 0xDB)},
+        {"label": "LABA KOTOR", "value": rp(laba), "sub": f"margin {dec(margin)}%",
+         "fill": GREEN_B, "text": WHITE, "subcolor": RGBColor(0xDC, 0xF3, 0xE3)},
+        {"label": "RATA-RATA / FAKTUR", "value": rp(omzet / n_faktur if n_faktur else 0),
+         "sub": f"laba {rp(laba/n_faktur if n_faktur else 0)}/faktur",
+         "fill": BLUE, "text": WHITE, "subcolor": RGBColor(0xD9, 0xEE, 0xF9)},
+        {"label": "LABA / UNIT", "value": rp(laba / qty if qty else 0),
+         "sub": f"dari {nf(qty)} unit",
+         "fill": ORANGE, "text": WHITE, "subcolor": RGBColor(0xFB, 0xEC, 0xD5)},
+    ], y=1.42, h=1.3)
+
+    kat = sf['KATEGORI BARANG'].astype(str).str.strip().str.upper()
+    gk = (sf.assign(KAT=kat).groupby('KAT')
+          .agg(omzet=('TOTAL HARGA', 'sum'), modal=('MODAL', 'sum'),
+               laba=('LABA', 'sum'))
+          .sort_values('omzet', ascending=False))
+
+    # grafik: modal vs laba per kategori (6 teratas)
+    top = gk.head(6)[::-1]
+    if len(top):
+        cd = CategoryChartData()
+        cd.categories = [str(i)[:16] for i in top.index]
+        cd.add_series("Modal", [float(v) for v in top['modal']])
+        cd.add_series("Laba", [float(v) for v in top['laba']])
+        gf = s.shapes.add_chart(XL_CHART_TYPE.BAR_STACKED, In(0.62), In(2.96),
+                                In(6.4), In(3.35), cd)
+        ch = gf.chart
+        _style_chart(ch, title="Modal & laba per kategori barang (panjang = omzet)",
+                     show_legend=True, legend_pos=XL_LEGEND_POSITION.TOP,
+                     show_labels=False, cat_size=9)
+        for i, col in enumerate([RED, GREEN_B]):
+            ch.series[i].format.fill.solid()
+            ch.series[i].format.fill.fore_color.rgb = col
+        # angka sumbu bernilai miliaran bikin label menumpuk; nilai pastinya
+        # sudah tersedia di tabel sebelah kanan
+        try:
+            from pptx.enum.chart import XL_TICK_LABEL_POSITION
+            ch.value_axis.tick_label_position = XL_TICK_LABEL_POSITION.NONE
+        except Exception:
+            pass
+
+    # tabel margin per kategori
+    _text(s, 7.25, 3.0, 5.47, 0.32, "Margin per kategori", font=F_H, size=14,
+          bold=True, color=NAVY)
+    yy = 3.44
+    for j, (h, x, w, al) in enumerate([("KATEGORI", 7.25, 1.7, PP_ALIGN.LEFT),
+                                        ("OMZET", 8.95, 1.25, PP_ALIGN.RIGHT),
+                                        ("LABA", 10.25, 1.25, PP_ALIGN.RIGHT),
+                                        ("MARGIN", 11.55, 1.17, PP_ALIGN.RIGHT)]):
+        _text(s, x, yy, w, 0.26, h, size=8.5, bold=True, color=MUTED,
+              spacing=0.8, align=al)
+    yy += 0.3
+    for i, (lbl, row) in enumerate(gk.head(6).iterrows()):
+        if i % 2 == 0:
+            _rect(s, 7.12, yy - 0.02, 5.6, 0.42, CARD, shape=MSO_SHAPE.RECTANGLE)
+        mg = (row['laba'] / row['omzet'] * 100) if row['omzet'] else 0
+        _text(s, 7.25, yy, 1.7, 0.38, str(lbl)[:16], size=10, color=INK,
+              anchor=MSO_ANCHOR.MIDDLE)
+        _text(s, 8.95, yy, 1.25, 0.38, rp(row['omzet']), size=9.5, color=INK,
+              align=PP_ALIGN.RIGHT, anchor=MSO_ANCHOR.MIDDLE)
+        _text(s, 10.25, yy, 1.25, 0.38, rp(row['laba']), size=9.5, color=INK,
+              align=PP_ALIGN.RIGHT, anchor=MSO_ANCHOR.MIDDLE)
+        _text(s, 11.55, yy, 1.17, 0.38, f"{dec(mg)}%", size=10, bold=True,
+              color=(GREEN_B if mg >= 30 else RED if mg < 12 else INK),
+              align=PP_ALIGN.RIGHT, anchor=MSO_ANCHOR.MIDDLE)
+        yy += 0.44
+
+    # catatan: jasa bermodal nol
+    jasa_omz = gk.loc['JASA', 'omzet'] if 'JASA' in gk.index else 0
+    porsi_jasa = (jasa_omz / omzet * 100) if omzet else 0
+    _footer(s, f"Modal diambil dari kolom HARGA BELI yang sudah berupa total per baris. "
+               f"Kategori JASA hampir seluruhnya bermodal nol sehingga marginnya tampil "
+               f"100% ({dec(porsi_jasa)}% dari omzet) — biaya tenaga kerja tidak "
+               f"dibebankan per faktur. Laba di sini laba kotor, belum dikurangi biaya operasional.")
+    return s
+
+
+def _slide_mlf(prs, mlf, meta):
+    """Rekap penjualan Voucher Tiket MLF semua cabang."""
+    s = prs.slides.add_slide(prs.slide_layouts[6])
+    _bg_image(s, prs)
+    _logos(s)
+    _title(s, "Voucher Tiket MLF")
+
+    if mlf is None or mlf.empty:
+        _text(s, 1.06, 0.94, 11.6, 0.3, meta["subjudul"], size=12, color=MUTED)
+        _text(s, 0.62, 3.0, 12.1, 0.5,
+              "Tidak ada penjualan voucher MLF pada periode/cabang ini.",
+              size=16, color=MUTED, align=PP_ALIGN.CENTER)
+        _footer(s, meta["footer"])
+        return s
+
+    qty = mlf['QTY'].sum()
+    omzet = mlf['TOTAL HARGA'].sum()
+    modal = mlf['MODAL'].sum()
+    laba = mlf['LABA'].sum()
+    margin = (laba / omzet * 100) if omzet else 0
+    n_cab = mlf['CABANG'].nunique()
+    hari = mlf['TGL'].dt.normalize().nunique()
+
+    _text(s, 1.06, 0.94, 11.6, 0.3,
+          f"{meta['subjudul']} · {nf(qty)} voucher terjual di {n_cab} cabang",
+          size=12, color=MUTED)
+
+    _kpi_row(s, [
+        {"label": "VOUCHER TERJUAL", "value": nf(qty), "sub": f"{nf(len(mlf))} transaksi",
+         "fill": NAVY, "text": WHITE, "subcolor": RGBColor(0xC7, 0xD3, 0xEA)},
+        {"label": "OMZET", "value": rp(omzet),
+         "sub": f"rata-rata {rp(omzet/qty if qty else 0)}/voucher",
+         "fill": BLUE, "text": WHITE, "subcolor": RGBColor(0xD9, 0xEE, 0xF9)},
+        {"label": "MODAL", "value": rp(modal),
+         "sub": f"{dec(modal/omzet*100 if omzet else 0)}% dari omzet",
+         "fill": RED, "text": WHITE, "subcolor": RGBColor(0xF7, 0xDE, 0xDB)},
+        {"label": "LABA KOTOR", "value": rp(laba), "sub": f"margin {dec(margin)}%",
+         "fill": GREEN_B, "text": WHITE, "subcolor": RGBColor(0xDC, 0xF3, 0xE3)},
+        {"label": "RATA-RATA / HARI", "value": dec(qty / hari if hari else 0),
+         "sub": f"{hari} hari ada penjualan",
+         "fill": ORANGE, "text": WHITE, "subcolor": RGBColor(0xFB, 0xEC, 0xD5)},
+    ], y=1.42, h=1.3)
+
+    # ranking cabang
+    pc = mlf.groupby('CABANG')['QTY'].sum().sort_values(ascending=False).head(10)
+    if len(pc):
+        rev = pc[::-1]
+        cd = CategoryChartData()
+        cd.categories = list(rev.index)
+        cd.add_series("Voucher", [int(v) for v in rev.values])
+        gf = s.shapes.add_chart(XL_CHART_TYPE.BAR_CLUSTERED, In(0.62), In(2.96),
+                                In(6.0), In(3.35), cd)
+        _style_chart(gf.chart, colors=[NAVY], title="Cabang dengan penjualan terbanyak",
+                     val_max=int(pc.iloc[0] * 1.25) + 1, cat_size=9)
+
+    # tren per bulan
+    bl = mlf.groupby(mlf['TGL'].dt.month)['QTY'].sum().sort_index()
+    if len(bl):
+        cd = CategoryChartData()
+        cd.categories = [BULAN_NAMES[int(b)][:3] for b in bl.index]
+        cd.add_series("Voucher", [int(v) for v in bl.values])
+        gf = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, In(6.85), In(2.96),
+                                In(5.87), In(3.35), cd)
+        _style_chart(gf.chart, colors=[BLUE], title="Penjualan voucher per bulan",
+                     val_max=int(bl.max() * 1.25) + 1, cat_size=10)
+
+    top_cab = pc.index[0] if len(pc) else "-"
+    top_val = int(pc.iloc[0]) if len(pc) else 0
+    _footer(s, f"Cabang terbanyak: {top_cab} ({nf(top_val)} voucher, "
+               f"{dec(top_val/qty*100 if qty else 0)}% dari total). "
+               f"Periode data: {mlf['TGL'].min():%d/%m/%Y} – {mlf['TGL'].max():%d/%m/%Y}.")
+    return s
+
+
+def _slide_bagihasil(prs, jasa, meta, *, tarif_map, tarif_flat, prioritas, periode_txt):
+    """Omzet jasa & bagi hasil per teknisi."""
+    s = prs.slides.add_slide(prs.slide_layouts[6])
+    _bg_image(s, prs)
+    _logos(s)
+    _title(s, "Bagi Hasil Teknisi")
+
+    if jasa is None or jasa.empty:
+        _text(s, 1.06, 0.94, 11.6, 0.3, meta["subjudul"], size=12, color=MUTED)
+        _text(s, 0.62, 3.0, 12.1, 0.5,
+              "Tidak ada transaksi jasa pada periode/cabang ini.",
+              size=16, color=MUTED, align=PP_ALIGN.CENTER)
+        _footer(s, meta["footer"])
+        return s
+
+    omzet = jasa['TOTAL HARGA'].sum()
+    bh = jasa['BAGI_HASIL'].sum()
+    fl = jasa['FLAT'].sum()
+    selisih = bh - fl
+    n_tek = jasa.loc[jasa['TEKNISI'] != 'TIDAK ADA TEKNISI', 'TEKNISI'].nunique()
+
+    _text(s, 1.06, 0.94, 11.6, 0.3,
+          f"Periode penggajian: {periode_txt} · {n_tek} teknisi",
+          size=12, color=MUTED)
+
+    _kpi_row(s, [
+        {"label": "OMZET JASA", "value": rp(omzet), "sub": f"{nf(len(jasa))} baris",
+         "fill": NAVY, "text": WHITE, "subcolor": RGBColor(0xC7, 0xD3, 0xEA)},
+        {"label": "BAGI HASIL (ATURAN)", "value": rp(bh),
+         "sub": f"{dec(bh/omzet*100 if omzet else 0)}% dari omzet jasa",
+         "fill": GREEN_B, "text": WHITE, "subcolor": RGBColor(0xDC, 0xF3, 0xE3)},
+        {"label": f"PEMBANDING FLAT {tarif_flat:.0f}%", "value": rp(fl),
+         "sub": f"omzet jasa × {tarif_flat:.0f}%",
+         "fill": RGBColor(0x7C, 0x3A, 0xED), "text": WHITE,
+         "subcolor": RGBColor(0xE4, 0xD9, 0xFA)},
+        {"label": "SELISIH", "value": rp(selisih),
+         "sub": ("aturan lebih besar" if selisih > 0
+                 else "flat lebih besar" if selisih < 0 else "sama"),
+         "fill": (ORANGE if selisih >= 0 else RED), "text": WHITE,
+         "subcolor": RGBColor(0xFB, 0xEC, 0xD5)},
+        {"label": "RATA-RATA / TEKNISI", "value": rp(bh / n_tek if n_tek else 0),
+         "sub": f"dari {n_tek} teknisi",
+         "fill": RGBColor(0x0F, 0x8A, 0x82), "text": WHITE,
+         "subcolor": RGBColor(0xD5, 0xEE, 0xEC)},
+    ], y=1.42, h=1.3)
+
+    # 10 teknisi teratas (nama + cabang)
+    rek = (jasa[jasa['TEKNISI'] != 'TIDAK ADA TEKNISI']
+           .groupby(['TEKNISI', 'CABANG'])['BAGI_HASIL'].sum()
+           .sort_values(ascending=False).head(10))
+    if len(rek):
+        rev = rek[::-1]
+        cats = [f"{t[:18]} — {c[:9]}" for t, c in rev.index]
+        cd = CategoryChartData()
+        cd.categories = cats
+        cd.add_series("Bagi Hasil", [float(v) for v in rev.values])
+        gf = s.shapes.add_chart(XL_CHART_TYPE.BAR_CLUSTERED, In(0.62), In(2.96),
+                                In(6.9), In(3.35), cd)
+        _style_chart(gf.chart, colors=[GREEN_B],
+                     title="10 teknisi dengan bagi hasil tertinggi",
+                     val_max=float(rek.iloc[0] * 1.3), cat_size=8,
+                     number_format='#,##0')
+
+    # komposisi per kategori tarif
+    gt = jasa.groupby('TARIF_LABEL').agg(
+        omzet=('TOTAL HARGA', 'sum'), bh=('BAGI_HASIL', 'sum')).sort_values(
+        'omzet', ascending=False)
+    _text(s, 7.75, 3.0, 4.97, 0.32, "Komposisi menurut tarif", font=F_H, size=14,
+          bold=True, color=NAVY)
+    yy = 3.44
+    _text(s, 7.75, yy, 1.75, 0.26, "KATEGORI", size=8.5, bold=True, color=MUTED, spacing=0.8)
+    _text(s, 9.5, yy, 0.75, 0.26, "TARIF", size=8.5, bold=True, color=MUTED,
+          spacing=0.8, align=PP_ALIGN.RIGHT)
+    _text(s, 10.3, yy, 1.2, 0.26, "OMZET", size=8.5, bold=True, color=MUTED,
+          spacing=0.8, align=PP_ALIGN.RIGHT)
+    _text(s, 11.55, yy, 1.17, 0.26, "BAGI HASIL", size=8.5, bold=True, color=MUTED,
+          spacing=0.8, align=PP_ALIGN.RIGHT)
+    yy += 0.3
+    for i, (lbl, row) in enumerate(gt.iterrows()):
+        if i >= 6:
+            break
+        if i % 2 == 0:
+            _rect(s, 7.62, yy - 0.02, 5.1, 0.42, CARD, shape=MSO_SHAPE.RECTANGLE)
+        tr = tarif_map.get(lbl, 0.0)
+        _text(s, 7.75, yy, 1.75, 0.38, str(lbl), size=10, color=INK,
+              anchor=MSO_ANCHOR.MIDDLE)
+        _text(s, 9.5, yy, 0.75, 0.38, f"{tr:.0f}%", size=10, bold=True, color=NAVY,
+              align=PP_ALIGN.RIGHT, anchor=MSO_ANCHOR.MIDDLE)
+        _text(s, 10.3, yy, 1.2, 0.38, rp(row['omzet']), size=9.5, color=INK,
+              align=PP_ALIGN.RIGHT, anchor=MSO_ANCHOR.MIDDLE)
+        _text(s, 11.55, yy, 1.17, 0.38, rp(row['bh']), size=9.5, bold=True, color=GREEN,
+              align=PP_ALIGN.RIGHT, anchor=MSO_ANCHOR.MIDDLE)
+        yy += 0.44
+
+    ket = " · ".join(f"{k} {v:.0f}%" for k, v in tarif_map.items())
+    _footer(s, f"Tarif: {ket}. Prioritas bila dua kata kunci: {prioritas}. "
+               f"Cutoff penggajian tanggal 24 s/d 23. Angka berbasis omzet jasa, "
+               f"belum dikurangi biaya apa pun.")
+    return s
+
+
 def _slide_penutup(prs, meta):
     s = prs.slides.add_slide(prs.slide_layouts[6])
     _bg_image(s, prs)
@@ -769,7 +1090,22 @@ def _slide_penutup(prs, meta):
 def build_deck(df_filtered, *, total_unique_all, total_raw_rows,
                f_tahun="Semua Tahun", f_bulan="Semua Bulan", f_cabang="Semua Cabang",
                penyusun="", sertakan=("ringkasan", "status", "harian", "hari_tertinggi",
-                                       "cabang", "pending", "done", "cancel", "penutup")):
+                                       "cabang", "pending", "done", "cancel",
+                                       "penjualan", "mlf", "bagihasil", "penutup"),
+               sales_filtered=None, tarif_map=None, tarif_flat=30.0,
+               prioritas="Normal", periode_bagihasil=None):
+    """Bangun deck presentasi.
+
+    Parameter tambahan:
+      sales_filtered  : data faktur penjualan yang sudah difilter (untuk slide
+                        Voucher MLF dan Bagi Hasil Teknisi). Boleh None.
+      tarif_map       : dict tarif bagi hasil dalam persen, mis.
+                        {'Interface':20,'Normal':30,'Mati Total':32,'Promo':60,
+                         'Lainnya':30}
+      tarif_flat      : tarif pembanding (persen)
+      prioritas       : kata kunci yang menang bila satu nama mengandung dua
+      periode_bagihasil : (tahun, bulan_gaji) untuk cutoff 24->23; None = ikut filter
+    """
     """Bangun deck dari data yang sudah difilter; kembalikan bytes .pptx."""
     prs = Presentation()
     prs.slide_width = In(13.333)
@@ -903,6 +1239,71 @@ def build_deck(df_filtered, *, total_unique_all, total_raw_rows,
                              jenis_func=_jenis_cancel, jenis_label="Cancel",
                              catatan="Setiap pembatalan berpotensi menandakan persoalan di harga, "
                                      "waktu tunggu, ketersediaan sparepart, atau komunikasi.")
+    # ---- slide berbasis data penjualan (opsional) ----
+    sf = sales_filtered
+    if sf is not None and not sf.empty:
+        sf = sf.copy()
+        if 'MODAL' not in sf.columns:
+            sf['MODAL'] = pd.to_numeric(sf.get('HARGA BELI', 0), errors='coerce').fillna(0)
+        if 'LABA' not in sf.columns:
+            sf['LABA'] = sf['TOTAL HARGA'] - sf['MODAL']
+        if 'TGL' not in sf.columns:
+            sf['TGL'] = pd.to_datetime(sf['TGL FAKTUR'], errors='coerce')
+
+        if "penjualan" in sertakan:
+            _slide_penjualan(prs, sf, meta)
+
+        if "mlf" in sertakan:
+            nb = sf['NAMA BARANG'].astype(str).str.upper()
+            _slide_mlf(prs, sf[nb.str.contains('MLF', na=False)], meta)
+
+        if "bagihasil" in sertakan:
+            tm = dict(tarif_map or {})
+            for k, v in TARIF_AWAL_PPT.items():
+                tm.setdefault(k, v)
+            tm.setdefault('Lainnya', 30.0)
+
+            kat = sf['KATEGORI BARANG'].astype(str).str.strip().str.upper()
+            jasa = sf[kat == 'JASA'].copy()
+
+            # periode cutoff 24 -> 23 bila bulan penggajian ditentukan
+            if periode_bagihasil and not jasa.empty:
+                ta, bg = periode_bagihasil
+                m_akhir, th_akhir = bg - 1, ta
+                if m_akhir < 1:
+                    m_akhir += 12
+                    th_akhir -= 1
+                m_awal, th_awal = m_akhir - 1, th_akhir
+                if m_awal < 1:
+                    m_awal += 12
+                    th_awal -= 1
+                a = pd.Timestamp(th_awal, m_awal, 24)
+                b = pd.Timestamp(th_akhir, m_akhir, 23)
+                jasa = jasa[(jasa['TGL'] >= a) & (jasa['TGL'] <= b)]
+                periode_txt = (f"Gaji {BULAN_NAMES[bg]} {ta} "
+                               f"({a.day} {BULAN_NAMES[a.month]} – "
+                               f"{b.day} {BULAN_NAMES[b.month]} {b.year})")
+            else:
+                periode_txt = periode
+
+            if not jasa.empty:
+                if 'TEKNISI' not in jasa.columns:
+                    fin = jasa.get('NAMA TEKNISI (FINAL)')
+                    asli = jasa.get('NAMA TEKNISI')
+                    tek = (fin.fillna(asli) if fin is not None else asli)
+                    jasa['TEKNISI'] = (tek.astype(str).str.strip().str.upper()
+                                       .replace({'NAN': '', 'NONE': ''}))
+                    jasa.loc[jasa['TEKNISI'] == '', 'TEKNISI'] = 'TIDAK ADA TEKNISI'
+                jasa['TARIF_LABEL'] = jasa['NAMA BARANG'].map(
+                    lambda s: _label_tarif(s, str(prioritas).upper()))
+                jasa['TARIF'] = jasa['TARIF_LABEL'].map(
+                    lambda k: tm.get(k, 0.0) / 100.0).fillna(0.0)
+                jasa['BAGI_HASIL'] = jasa['TOTAL HARGA'] * jasa['TARIF']
+                jasa['FLAT'] = jasa['TOTAL HARGA'] * (tarif_flat / 100.0)
+
+            _slide_bagihasil(prs, jasa, meta, tarif_map=tm, tarif_flat=tarif_flat,
+                             prioritas=prioritas, periode_txt=periode_txt)
+
     if "penutup" in sertakan and kes:
         _slide_penutup(prs, meta)
 

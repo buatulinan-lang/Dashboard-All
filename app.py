@@ -682,6 +682,9 @@ _SLIDE_LABELS = {
     "pending": "Detail Pending",
     "done": "Detail Done",
     "cancel": "Detail Cancel",
+    "penjualan": "Penjualan (Modal & Laba)",
+    "mlf": "Voucher Tiket MLF",
+    "bagihasil": "Bagi Hasil Teknisi",
     "penutup": "Kesimpulan",
 }
 _slide_pilihan = st.sidebar.multiselect(
@@ -691,6 +694,24 @@ _slide_pilihan = st.sidebar.multiselect(
     format_func=lambda x: _SLIDE_LABELS[x],
     key="ppt_slides",
 )
+
+# periode penggajian khusus slide Bagi Hasil Teknisi
+if not sales.empty and 'bagihasil' in _slide_pilihan:
+    _jasa_src = sales[sales['KATEGORI'] == 'JASA']
+    _per_list = (daftar_periode_gaji(_jasa_src['TGL'].min(), _jasa_src['TGL'].max())
+                 if not _jasa_src.empty else [])
+    if _per_list:
+        _opsi_bh = ['Ikuti filter di atas'] + _per_list
+        _pilih_bh = st.sidebar.selectbox(
+            "Periode gaji (slide Bagi Hasil)", _opsi_bh,
+            index=len(_opsi_bh) - 1,
+            format_func=lambda x: (x if isinstance(x, str)
+                                   else label_periode(x[1], x[0])),
+            key='ppt_periode_pilih',
+            help="Cutoff tanggal 24 s/d 23. Pilih 'Ikuti filter di atas' agar "
+                 "memakai filter Tahun/Bulan biasa.")
+        st.session_state['ppt_periode_bh'] = (
+            None if isinstance(_pilih_bh, str) else _pilih_bh)
 
 if st.sidebar.button("🎬 Buat PPT dari Dashboard", use_container_width=True, type="primary"):
     if filtered.empty:
@@ -705,6 +726,20 @@ if st.sidebar.button("🎬 Buat PPT dari Dashboard", use_container_width=True, t
                 sys.path.insert(0, _app_dir)
 
             from pptx_export import build_deck
+
+            # tarif bagi hasil mengikuti isian di tab Bagi Hasil Teknisi;
+            # kalau tab itu belum pernah dibuka, dipakai nilai awal.
+            _tarif_map = {
+                'Interface': st.session_state.get('tar_int', TARIF_AWAL['Interface']),
+                'Normal': st.session_state.get('tar_nor', TARIF_AWAL['Normal']),
+                'Mati Total': st.session_state.get('tar_mat', TARIF_AWAL['Mati Total']),
+                'Promo': st.session_state.get('tar_pro', TARIF_AWAL['Promo']),
+                'Lainnya': st.session_state.get('tar_lain', TARIF_DEFAULT_AWAL),
+            }
+            _tarif_flat = st.session_state.get('tar_flat', TARIF_PEMBANDING_AWAL)
+            _prioritas = st.session_state.get('tar_prio', 'Normal')
+            _periode_bh = st.session_state.get('ppt_periode_bh')
+
             with st.spinner("Menyusun presentasi..."):
                 _ppt_bytes = build_deck(
                     filtered,
@@ -713,6 +748,11 @@ if st.sidebar.button("🎬 Buat PPT dari Dashboard", use_container_width=True, t
                     f_tahun=f_tahun, f_bulan=f_bulan, f_cabang=f_cabang,
                     penyusun=_penyusun,
                     sertakan=tuple(_slide_pilihan) if _slide_pilihan else ("ringkasan",),
+                    sales_filtered=(sales_f if not sales_f.empty else None),
+                    tarif_map=_tarif_map,
+                    tarif_flat=_tarif_flat,
+                    prioritas=_prioritas,
+                    periode_bagihasil=_periode_bh,
                 )
             st.session_state["ppt_bytes"] = _ppt_bytes
             _tag_t = "SemuaTahun" if f_tahun == "Semua Tahun" else str(f_tahun)

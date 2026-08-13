@@ -13,6 +13,7 @@ hitung ulang. Tidak perlu internet, semua proses jalan di komputer sendiri.
 
 import calendar
 import io
+import re
 from datetime import date
 from pathlib import Path
 
@@ -362,6 +363,23 @@ def daftar_periode_gaji(tgl_min, tgl_max):
     return hasil
 
 
+def nfid(v, desimal=0):
+    """Angka gaya Indonesia: 68.838 · 1.234,5"""
+    try:
+        s = f"{float(v):,.{desimal}f}"
+    except (TypeError, ValueError):
+        return str(v)
+    return s.replace(",", "#").replace(".", ",").replace("#", ".")
+
+
+def pctid(v, desimal=1):
+    """Persen gaya Indonesia: 84,0%"""
+    try:
+        return f"{float(v):.{desimal}f}%".replace(".", ",")
+    except (TypeError, ValueError):
+        return str(v)
+
+
 def rp(v, singkat=True):
     """Format rupiah ringkas: 1,2 M / 340,5 jt / 12.500."""
     try:
@@ -447,6 +465,89 @@ def _delta_html(baru, lama, fmt, higher_better=True, satuan=""):
     return (f"<td style='padding:6px 10px;font-weight:700'>{fmt(baru)}{satuan}</td>"
             f"<td style='padding:6px 10px;color:#6b7280'>{fmt(lama)}{satuan}</td>"
             f"<td style='padding:6px 10px;text-align:right'>{badge}</td>")
+
+
+def hitung_banding(pot, metrik):
+    """Hitung isi tabel perbandingan (dipakai layar maupun PDF).
+
+    Kembalikan list dict siap pakai untuk pdf_export.build_pdf.
+    """
+    from pdf_export import GREEN as PG, RED as PR, MUTED as PM
+    hasil = []
+    if not pot:
+        return hasil
+
+    def susun(judul, lama_df, baru_df, nama_baru, nama_lama, catatan):
+        baris = []
+        for nama, fn, fmt, hb in metrik:
+            try:
+                v_baru, v_lama = fn(baru_df), fn(lama_df)
+            except Exception:
+                continue
+            if v_lama in (None, 0) or pd.isna(v_lama):
+                teks, warna = "—", PM
+            else:
+                p = (v_baru - v_lama) / abs(v_lama) * 100
+                naik = p > 0
+                baik = naik if hb else (not naik)
+                warna = PG if (baik and abs(p) > 0.05) else (PR if abs(p) > 0.05 else PM)
+                teks = f"{'+' if naik else ''}{p:.1f}%".replace('.', ',')
+            baris.append((nama, fmt(v_baru), fmt(v_lama), teks, warna))
+        return {'judul': judul, 'baris': baris, 'nama_baru': nama_baru,
+                'nama_lama': nama_lama, 'catatan': catatan}
+
+    cat_mom = (f"Dibandingkan setara: tanggal 1-{pot['hari_n']} pada kedua bulan."
+               + (f" Tanggal {pot['hari_dibuang']} dikecualikan karena datanya belum "
+                  "lengkap sehari penuh." if pot['hari_dibuang'] else ""))
+    hasil.append(susun("Bulan Ini vs Bulan Lalu", pot['bulan_lalu'], pot['bulan_ini'],
+                       pot['nama_bulan_ini'], pot['nama_bulan_lalu'], cat_mom))
+
+    if not pot['tahun_lalu'].empty:
+        cat_yoy = (f"Dibandingkan setara: 1 Januari - {pot['hari_n']} "
+                   f"{BULAN_NAMES[pot['bulan']]} pada kedua tahun.")
+        hasil.append(susun("Tahun Ini vs Tahun Lalu", pot['tahun_lalu'], pot['tahun_ini'],
+                           pot['nama_tahun_ini'], pot['nama_tahun_lalu'], cat_yoy))
+    else:
+        hasil.append({'judul': 'Tahun Ini vs Tahun Lalu', 'baris': [],
+                      'nama_baru': pot['nama_tahun_ini'],
+                      'nama_lama': pot['nama_tahun_lalu'],
+                      'catatan': f"Tidak bisa dibandingkan - data "
+                                 f"{pot['nama_tahun_lalu']} tidak tersedia."})
+    return hasil
+
+
+def tombol_pdf(nama_dashboard, pot, metrik, temuan, kpis=None, metodologi="",
+               ringkasan="", key=""):
+    """Tampilkan tombol unduh laporan analisa dalam bentuk PDF."""
+    try:
+        from pdf_export import build_pdf
+    except Exception as e:  # noqa: BLE001
+        st.caption(f"Unduhan PDF tidak tersedia: {e}")
+        return
+
+    periode = ("Semua Periode" if f_tahun == 'Semua Tahun' and f_bulan == 'Semua Bulan'
+               else (f"Tahun {f_tahun}" if f_bulan == 'Semua Bulan'
+                     else (f"{BULAN_NAMES[int(f_bulan)]} (semua tahun)"
+                           if f_tahun == 'Semua Tahun'
+                           else f"{BULAN_NAMES[int(f_bulan)]} {f_tahun}")))
+    cab_txt = "Seluruh Cabang" if f_cabang == 'Semua Cabang' else f"Cabang {f_cabang}"
+
+    try:
+        data = build_pdf(
+            judul=nama_dashboard, periode=periode, cabang=cab_txt,
+            kpis=kpis or [], banding=hitung_banding(pot, metrik),
+            temuan=temuan, metodologi=metodologi, ringkasan=ringkasan,
+            penyusun=st.session_state.get('ppt_penyusun', ''))
+    except Exception as e:  # noqa: BLE001
+        st.caption(f"Gagal menyusun PDF: {e}")
+        return
+
+    nm = re.sub(r'[^A-Za-z0-9]+', '_', nama_dashboard).strip('_')
+    tag = f"{f_tahun}" if f_tahun != 'Semua Tahun' else 'semua'
+    st.download_button(
+        "📄 Unduh Analisa (PDF)", data=data,
+        file_name=f"Analisa_{nm}_{tag}.pdf", mime="application/pdf",
+        key=f"pdf_{key}", use_container_width=False)
 
 
 def render_banding(pot, metrik, key_prefix=""):
@@ -726,14 +827,15 @@ def render_detail_dashboard(filtered_df, total_unique_all, *, status_bucket, jen
     st.markdown("### 📊 Perbandingan Periode")
     _pot = potong_periode(filtered_df, 'TGL PENGIRIMAN')
     _sb = status_bucket
-    render_banding(_pot, [
+    _metrik_d = [
         (f"Jumlah {rank_label}", lambda x: int((x['STATUS_BUCKET'] == _sb).sum()),
          lambda v: f"{v:,.0f}", (_sb == 'DONE')),
         (f"% {rank_label} dari total",
          lambda x: (x['STATUS_BUCKET'] == _sb).mean() * 100 if len(x) else 0,
          lambda v: f"{v:.1f}%".replace('.', ','), (_sb == 'DONE')),
-        ("Total transaksi", lambda x: len(x), lambda v: f"{v:,.0f}", True),
-    ], key_prefix=key_prefix)
+        ("Total transaksi", lambda x: len(x), lambda v: nfid(v), True),
+    ]
+    render_banding(_pot, _metrik_d, key_prefix=key_prefix)
 
     # ---------- analisa otomatis ----------
     st.markdown("### 🧭 Analisa & Tindak Lanjut")
@@ -809,6 +911,23 @@ def render_detail_dashboard(filtered_df, total_unique_all, *, status_bucket, jen
         _an.append(('info', 'Belum ada temuan menonjol',
                     "Tidak ada pola mencolok pada filter ini."))
     panel_analisa(_an)
+
+    from pdf_export import NAVY as _PN, GREEN as _PG, RED as _PR, AMBER as _PA
+    _wrn = {'DONE': _PG, 'CANCEL': _PR, 'PENDING': _PA}.get(_sb, _PN)
+    _kp = [{'label': f'Jumlah {rank_label}', 'value': nfid(total_s),
+            'sub': f"{pctid(porsi)} dari total", 'warna': _wrn}]
+    if total_s:
+        _kp += [{'label': 'Teknisi Terbanyak',
+                 'value': (str(tek.index[0])[:20] if len(tek) else '-'),
+                 'sub': (f"{nfid(tek.iloc[0])} unit" if len(tek) else '-'), 'warna': _PN},
+                {'label': 'Cabang Terbanyak', 'value': str(cab.index[0])[:16],
+                 'sub': f"{nfid(cab.iloc[0])} unit", 'warna': _PN},
+                {'label': 'Kerusakan Terbanyak', 'value': str(ker.index[0])[:18],
+                 'sub': f"{nfid(ker.iloc[0])} unit", 'warna': _PR}]
+    tombol_pdf(f"Dashboard {rank_label}", _pot, _metrik_d, _an, kpis=_kp,
+               ringkasan=(f"{nfid(total_s)} transaksi berstatus {rank_label.lower()} "
+                          f"({pctid(porsi)} dari seluruh transaksi pada filter ini)."),
+               metodologi=note_text, key=key_prefix)
 
     with st.expander("ℹ️ Catatan metodologi"):
         st.write(note_text)
@@ -1141,17 +1260,18 @@ with tab_main:
     # ---------- perbandingan periode ----------
     st.markdown("### 📊 Perbandingan Periode")
     _pot = potong_periode(filtered, 'TGL PENGIRIMAN')
-    render_banding(_pot, [
-        ("Total transaksi", lambda x: len(x), lambda v: f"{v:,.0f}", True),
+    _metrik_utama = [
+        ("Total transaksi", lambda x: len(x), lambda v: nfid(v), True),
         ("Selesai (Done)", lambda x: int((x['STATUS_BUCKET'] == 'DONE').sum()),
-         lambda v: f"{v:,.0f}", True),
+         lambda v: nfid(v), True),
         ("Batal (Cancel)", lambda x: int((x['STATUS_BUCKET'] == 'CANCEL').sum()),
-         lambda v: f"{v:,.0f}", False),
+         lambda v: nfid(v), False),
         ("% Penyelesaian", lambda x: (x['STATUS_BUCKET'] == 'DONE').mean() * 100 if len(x) else 0,
-         lambda v: f"{v:.1f}%".replace('.', ','), True),
+         lambda v: pctid(v), True),
         ("% Pembatalan", lambda x: (x['STATUS_BUCKET'] == 'CANCEL').mean() * 100 if len(x) else 0,
-         lambda v: f"{v:.1f}%".replace('.', ','), False),
-    ], key_prefix='main')
+         lambda v: pctid(v), False),
+    ]
+    render_banding(_pot, _metrik_utama, key_prefix='main')
 
     # ---------- analisa otomatis ----------
     st.markdown("### 🧭 Analisa & Tindak Lanjut")
@@ -1263,6 +1383,24 @@ with tab_main:
                     "Angka pada filter ini relatif stabil. Perluas rentang filter "
                     "atau bandingkan antar cabang untuk melihat pola yang lebih jelas."))
     panel_analisa(_an)
+
+    from pdf_export import NAVY as _PN, GREEN as _PG, RED as _PR, AMBER as _PA
+    tombol_pdf(
+        "Dashboard Status Pengerjaan", _pot, _metrik_utama, _an,
+        kpis=[{'label': 'Total Transaksi', 'value': nfid(total), 'sub': 'sesuai filter', 'warna': _PN},
+              {'label': 'Selesai (Done)', 'value': nfid(done), 'sub': pct(done), 'warna': _PG},
+              {'label': 'Batal (Cancel)', 'value': nfid(cancel), 'sub': pct(cancel), 'warna': _PR},
+              {'label': 'Pending', 'value': nfid(pending), 'sub': pct(pending), 'warna': _PA},
+              {'label': 'Rata-rata / Hari', 'value': nfid(avg_day, 1),
+               'sub': f"{period_days} hari", 'warna': _PN}],
+        ringkasan=(f"Dari {nfid(total)} transaksi pada periode ini, {nfid(done)} selesai "
+                   f"({pct(done)}), {nfid(cancel)} batal ({pct(cancel)}), dan {nfid(pending)} "
+                   f"masih tertahan."),
+        metodologi=("Baris dengan seluruh kolom identik dihitung sebagai 1 transaksi. "
+                    "Done = status mengandung DONE; Pending = mengandung PENDING atau "
+                    "COMPLAIN; Cancel = mengandung CANCEL. Filter Tahun/Bulan mengacu "
+                    "kolom TGL PENGIRIMAN."),
+        key='utama')
 
     with st.expander("ℹ️ Catatan metodologi"):
         st.write(
@@ -1519,16 +1657,17 @@ with tab_jual:
         # ---------- perbandingan periode ----------
         st.markdown("### 📊 Perbandingan Periode")
         _potj = potong_periode(sj, 'TGL')
-        render_banding(_potj, [
+        _metrik_j = [
             ("Omzet", lambda x: x['TOTAL HARGA'].sum(), lambda v: rp(v), True),
             ("Modal", lambda x: x['MODAL'].sum(), lambda v: rp(v), False),
             ("Laba kotor", lambda x: x['LABA'].sum(), lambda v: rp(v), True),
             ("Margin", lambda x: (x['LABA'].sum() / x['TOTAL HARGA'].sum() * 100)
              if x['TOTAL HARGA'].sum() else 0,
-             lambda v: f"{v:.1f}%".replace('.', ','), True),
+             lambda v: pctid(v), True),
             ("Jumlah nota", lambda x: x.groupby(['CABANG', 'NO FAKTUR']).ngroups,
-             lambda v: f"{v:,.0f}", True),
-        ], key_prefix='jual')
+             lambda v: nfid(v), True),
+        ]
+        render_banding(_potj, _metrik_j, key_prefix='jual')
 
         st.markdown("### 🧭 Analisa & Tindak Lanjut")
         _anj = []
@@ -1583,6 +1722,26 @@ with tab_jual:
         if not _anj:
             _anj.append(('info', 'Belum ada temuan menonjol', "Angka relatif stabil."))
         panel_analisa(_anj)
+
+        from pdf_export import NAVY as _PN, GREEN as _PG, RED as _PR, AMBER as _PA
+        tombol_pdf("Dashboard Penjualan", _potj, _metrik_j, _anj,
+                   kpis=[{'label': 'Omzet', 'value': rp(omzet), 'sub': f"{nfid(len(sj))} baris", 'warna': _PN},
+                         {'label': 'Modal', 'value': rp(modal),
+                          'sub': f"{pctid(modal/omzet*100 if omzet else 0)} omzet", 'warna': _PR},
+                         {'label': 'Laba Kotor', 'value': rp(laba),
+                          'sub': f"margin {pctid(margin)}", 'warna': _PG},
+                         {'label': 'Jumlah Nota', 'value': nfid(n_faktur),
+                          'sub': f"rata-rata {rp(omzet/n_faktur if n_faktur else 0)}", 'warna': _PN},
+                         {'label': 'Unit Terjual', 'value': nfid(qty),
+                          'sub': f"laba {rp(laba/qty if qty else 0)}/unit", 'warna': _PA}],
+                   ringkasan=(f"Omzet {rp(omzet)} dengan modal {rp(modal)} menghasilkan "
+                              f"laba kotor {rp(laba)} (margin {pctid(margin)})."),
+                   metodologi=("Modal dari kolom HARGA BELI yang sudah berupa total per "
+                               "baris. Laba kotor = TOTAL HARGA - MODAL, belum dikurangi "
+                               "biaya operasional. Kategori JASA bermodal nol sehingga "
+                               "marginnya tampil 100%. Satu nota = kombinasi Cabang + "
+                               "Nomor Faktur."),
+                   key='jual')
 
         with st.expander("ℹ️ Catatan metodologi"):
             st.write(
@@ -1736,14 +1895,15 @@ with tab_mlf:
             # ---------- perbandingan periode ----------
             st.markdown("### 📊 Perbandingan Periode")
             _potm = potong_periode(mlf, 'TGL')
-            render_banding(_potm, [
-                ("Voucher terjual", lambda x: x['QTY'].sum(), lambda v: f"{v:,.0f}", True),
-                ("Transaksi", lambda x: len(x), lambda v: f"{v:,.0f}", True),
+            _metrik_m = [
+                ("Voucher terjual", lambda x: x['QTY'].sum(), lambda v: nfid(v), True),
+                ("Transaksi", lambda x: len(x), lambda v: nfid(v), True),
                 ("Omzet", lambda x: x['TOTAL HARGA'].sum(), lambda v: rp(v), True),
                 ("Laba kotor", lambda x: x['LABA'].sum(), lambda v: rp(v), True),
                 ("Cabang menjual", lambda x: x['CABANG'].nunique(),
-                 lambda v: f"{v:,.0f}", True),
-            ], key_prefix='mlf')
+                 lambda v: nfid(v), True),
+            ]
+            render_banding(_potm, _metrik_m, key_prefix='mlf')
 
             st.markdown("### 🧭 Analisa & Tindak Lanjut")
             _anm = []
@@ -1786,6 +1946,23 @@ with tab_mlf:
                          f"memang tipis karena harga belinya sudah tinggi — nilainya lebih "
                          f"pada menarik pelanggan datang, bukan pada labanya sendiri."))
             panel_analisa(_anm)
+
+            from pdf_export import NAVY as _PN, GREEN as _PG, RED as _PR, AMBER as _PA
+            tombol_pdf("Dashboard Voucher Tiket MLF", _potm, _metrik_m, _anm,
+                       kpis=[{'label': 'Voucher Terjual', 'value': nfid(qty),
+                              'sub': f"{nfid(len(mlf))} transaksi", 'warna': _PN},
+                             {'label': 'Omzet', 'value': rp(omzet),
+                              'sub': f"rata-rata {rp(omzet/qty if qty else 0)}/voucher", 'warna': _PN},
+                             {'label': 'Laba Kotor', 'value': rp(laba),
+                              'sub': f"margin {pctid(margin)}", 'warna': _PG},
+                             {'label': 'Cabang Menjual', 'value': f"{n_cab}",
+                              'sub': f"dari {sales['CABANG'].nunique()} cabang", 'warna': _PA}],
+                       ringkasan=(f"{nfid(qty)} voucher terjual di {n_cab} cabang, "
+                                  f"omzet {rp(omzet)} dengan laba {rp(laba)}."),
+                       metodologi=("Dihitung dari baris yang nama barangnya mengandung "
+                                   "kata MLF. Modal dari kolom HARGA BELI yang sudah "
+                                   "berupa total per baris."),
+                       key='mlf')
 
             with st.expander("ℹ️ Catatan metodologi"):
                 nm = mlf['BARANG'].value_counts()
@@ -1970,7 +2147,7 @@ with tab_tek:
                              ('flat lebih besar' if selisih < 0 else 'sama')),
                      'grad': ('linear-gradient(135deg,#e0921f,#e2b21a)' if selisih >= 0
                               else 'linear-gradient(135deg,#c9392f,#e0475a)')},
-                    {'label': 'Jumlah Teknisi', 'value': f"{n_tek:,}",
+                    {'label': 'Jumlah Teknisi', 'value': nfid(n_tek),
                      'sub': f"rata-rata {rp(bh/n_tek if n_tek else 0)}/teknisi",
                      'grad': 'linear-gradient(135deg,#0f8a82,#17a3a3)'},
                     {'label': 'Tanpa Nama Teknisi', 'value': rp(
@@ -2080,7 +2257,7 @@ with tab_tek:
                 # ---------- perbandingan periode ----------
                 st.markdown("### 📊 Perbandingan Periode")
                 _pott = potong_periode(jasa_all, 'TGL')
-                render_banding(_pott, [
+                _metrik_t = [
                     ("Omzet jasa", lambda x: x['TOTAL HARGA'].sum(), lambda v: rp(v), True),
                     ("Bagi hasil (aturan)", lambda x: x['BAGI_HASIL'].sum(),
                      lambda v: rp(v), True),
@@ -2089,11 +2266,12 @@ with tab_tek:
                     ("Tarif efektif", lambda x: (x['BAGI_HASIL'].sum() /
                                                  x['TOTAL HARGA'].sum() * 100)
                      if x['TOTAL HARGA'].sum() else 0,
-                     lambda v: f"{v:.1f}%".replace('.', ','), False),
+                     lambda v: pctid(v), False),
                     ("Teknisi aktif",
                      lambda x: x.loc[x['TEKNISI'] != 'TIDAK ADA TEKNISI', 'TEKNISI'].nunique(),
-                     lambda v: f"{v:,.0f}", True),
-                ], key_prefix='tek')
+                     lambda v: nfid(v), True),
+                ]
+                render_banding(_pott, _metrik_t, key_prefix='tek')
 
                 st.markdown("### 🧭 Analisa & Tindak Lanjut")
                 _ant = []
@@ -2146,6 +2324,35 @@ with tab_tek:
                 if not _ant:
                     _ant.append(('info', 'Belum ada temuan menonjol', "Angka relatif stabil."))
                 panel_analisa(_ant)
+
+                from pdf_export import NAVY as _PN, GREEN as _PG, RED as _PR, AMBER as _PA
+                tombol_pdf("Dashboard Bagi Hasil Teknisi", _pott, _metrik_t, _ant,
+                           kpis=[{'label': 'Omzet Jasa', 'value': rp(omzet_j),
+                                  'sub': f"{nfid(len(jasa))} baris", 'warna': _PN},
+                                 {'label': 'Bagi Hasil (Aturan)', 'value': rp(bh),
+                                  'sub': f"{pctid(bh/omzet_j*100 if omzet_j else 0)} omzet jasa",
+                                  'warna': _PG},
+                                 {'label': f'Pembanding Flat {tarif_flat:.0f}%',
+                                  'value': rp(bh_flat), 'sub': 'skema pembanding', 'warna': _PN},
+                                 {'label': 'Selisih', 'value': rp(selisih),
+                                  'sub': ('aturan lebih besar' if selisih > 0 else 'flat lebih besar'),
+                                  'warna': (_PA if selisih >= 0 else _PR)},
+                                 {'label': 'Jumlah Teknisi', 'value': nfid(n_tek),
+                                  'sub': f"rata-rata {rp(bh/n_tek if n_tek else 0)}", 'warna': _PN}],
+                           ringkasan=(f"Periode {periode_txt}. Omzet jasa {rp(omzet_j)} "
+                                      f"menghasilkan bagi hasil {rp(bh)}, "
+                                      f"{'lebih hemat' if selisih < 0 else 'lebih besar'} "
+                                      f"{rp(abs(selisih))} dibanding skema flat "
+                                      f"{tarif_flat:.0f}%."),
+                           metodologi=(f"Tarif: Interface {tarif_input['Interface']:.0f}%, "
+                                       f"Normal {tarif_input['Normal']:.0f}%, Mati Total "
+                                       f"{tarif_input['Mati Total']:.0f}%, Promo "
+                                       f"{tarif_input['Promo']:.0f}%, tanpa kata kunci "
+                                       f"{tarif_lain:.0f}%. Bila dua kata kunci bertemu, "
+                                       f"dipakai {prioritas}. Periode penggajian memakai "
+                                       f"cutoff tanggal 24 s/d 23. Angka berbasis omzet "
+                                       f"jasa, belum dikurangi biaya."),
+                           key='tek')
 
                 with st.expander("ℹ️ Cara perhitungan & catatan"):
                     st.write(
@@ -2403,18 +2610,19 @@ with tab_bundling:
         st.markdown("### 📊 Perbandingan Periode")
         _nota_p = nota.rename(columns={'Tgl': 'TGL'})
         _potb = potong_periode(_nota_p, 'TGL')
-        render_banding(_potb, [
-            ("Total nota", lambda x: len(x), lambda v: f"{v:,.0f}", True),
+        _metrik_b = [
+            ("Total nota", lambda x: len(x), lambda v: nfid(v), True),
             ("Nota bundling", lambda x: int(x['Bundling'].sum()),
-             lambda v: f"{v:,.0f}", True),
+             lambda v: nfid(v), True),
             ("Attach rate", lambda x: x['Bundling'].mean() * 100 if len(x) else 0,
-             lambda v: f"{v:.1f}%".replace('.', ','), True),
+             lambda v: pctid(v), True),
             ("Nilai aksesoris", lambda x: x['Nilai Aksesoris'].sum(),
              lambda v: rp(v), True),
             ("Belum bundling",
              lambda x: int(((~x['Ada Aksesoris']) & x['Ada Lainnya']).sum()),
-             lambda v: f"{v:,.0f}", False),
-        ], key_prefix='bund')
+             lambda v: nfid(v), False),
+        ]
+        render_banding(_potb, _metrik_b, key_prefix='bund')
 
         st.markdown("### 🧭 Analisa & Tindak Lanjut")
         _anb = []
@@ -2466,6 +2674,28 @@ with tab_bundling:
                      "artinya peluang terbesar ada saat pelanggan mengambil unit yang "
                      "selesai diperbaiki — bukan saat pembelian unit baru."))
         panel_analisa(_anb)
+
+        from pdf_export import NAVY as _PN, GREEN as _PG, RED as _PR, AMBER as _PA
+        tombol_pdf("Dashboard Bundling Aksesoris", _potb, _metrik_b, _anb,
+                   kpis=[{'label': 'Total Nota', 'value': nfid(tot_nota),
+                          'sub': 'sesuai filter', 'warna': _PN},
+                         {'label': 'Nota Bundling', 'value': nfid(n_bund),
+                          'sub': f"attach rate {pctid(rate)}", 'warna': _PG},
+                         {'label': 'Belum Bundling', 'value': nfid(len(peluang)),
+                          'sub': 'peluang penawaran', 'warna': _PA},
+                         {'label': 'Omzet Bundling', 'value': rp(bund['Nilai'].sum()),
+                          'sub': 'dari nota bundling', 'warna': _PN},
+                         {'label': 'Nilai Aksesoris', 'value': rp(bund['Nilai Aksesoris'].sum()),
+                          'sub': 'dalam nota bundling', 'warna': _PG}],
+                   ringkasan=(f"Dari {nfid(tot_nota)} nota, {nfid(n_bund)} memuat aksesoris "
+                              f"bersama kategori lain (attach rate {pctid(rate)}). "
+                              f"Masih ada {nfid(len(peluang))} nota yang belum ditawari "
+                              f"aksesoris."),
+                   metodologi=("Satu nota = kombinasi Cabang + Nomor Faktur. Nota bundling "
+                               "= memuat minimal satu item AKSESORIS dan minimal satu item "
+                               "kategori lain, total minimal 2 produk. Nilai memakai TOTAL "
+                               "HARGA (omzet), belum dikurangi biaya."),
+                   key='bund')
 
         with st.expander("ℹ️ Cara perhitungan & catatan"):
             st.write(

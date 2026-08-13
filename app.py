@@ -796,9 +796,11 @@ if st.session_state.get("ppt_bytes"):
 # ---------------------------------------------------------------------------
 # TABS
 # ---------------------------------------------------------------------------
-tab_main, tab_pending, tab_done, tab_cancel, tab_jual, tab_mlf, tab_tek = st.tabs(
+(tab_main, tab_pending, tab_done, tab_cancel, tab_jual, tab_mlf, tab_tek,
+ tab_bundling) = st.tabs(
     ["📊 Dashboard Utama", "⚠️ Dashboard Pending", "✅ Dashboard Done",
-     "🚫 Dashboard Cancel", "💰 Penjualan", "🎫 Voucher MLF", "🧰 Omzet & Bagi Hasil Teknisi"]
+     "🚫 Dashboard Cancel", "💰 Penjualan", "🎫 Voucher MLF",
+     "🧰 Omzet & Bagi Hasil Teknisi", "🎁 Bundling Aksesoris"]
 )
 
 # =============================================================================
@@ -1021,7 +1023,9 @@ with tab_jual:
         modal = sj['MODAL'].sum()
         laba = sj['LABA'].sum()
         margin = (laba / omzet * 100) if omzet else 0
-        n_faktur = sj['NO FAKTUR'].nunique()
+        # Nomor faktur berjalan sendiri-sendiri di tiap cabang (satu nomor bisa
+        # dipakai beberapa cabang), jadi satu nota = kombinasi cabang + nomor.
+        n_faktur = sj.groupby(['CABANG', 'NO FAKTUR']).ngroups
         qty = sj['QTY'].sum()
 
         st.markdown(kpi_html([
@@ -1608,3 +1612,247 @@ with tab_tek:
                         "Perhitungan ini memakai **omzet jasa (TOTAL HARGA)**, belum dikurangi "
                         "biaya apa pun."
                     )
+
+# =============================================================================
+# TAB 8: BUNDLING AKSESORIS
+# =============================================================================
+with tab_bundling:
+    st.markdown("## Bundling Aksesoris — Attach Rate per Nota")
+
+    if sales.empty:
+        st.info(
+            "Data penjualan belum tersedia. Tambahkan file `data/penjualan.csv.gz` ke repo, "
+            "atau upload lewat panel kiri."
+        )
+    elif sales_f.empty:
+        st.warning("Tidak ada data penjualan untuk filter yang dipilih.")
+    else:
+        sb = sales_f.copy()
+        sb['IS_AKS'] = sb['KATEGORI'].isin(['AKSESORIS', 'ACCESORIES'])
+
+        # Satu nota = kombinasi CABANG + NO FAKTUR, karena penomoran faktur
+        # berjalan sendiri-sendiri di tiap cabang.
+        nota = sb.groupby(['CABANG', 'NO FAKTUR']).agg(
+            Baris=('KATEGORI', 'size'),
+            Qty=('QTY', 'sum'),
+            Nilai=('TOTAL HARGA', 'sum'),
+            Laba=('LABA', 'sum'),
+            n_aks=('IS_AKS', 'sum'),
+            Tgl=('TGL', 'min'),
+            Penjual=('PENJUAL', 'first'),
+        ).reset_index()
+        nota['n_lain'] = nota['Baris'] - nota['n_aks']
+        nota['Ada Aksesoris'] = nota['n_aks'] > 0
+        nota['Ada Lainnya'] = nota['n_lain'] > 0
+        nota['Bundling'] = (nota['Ada Aksesoris'] & nota['Ada Lainnya']
+                            & (nota['Baris'] >= 2))
+        nota['BULAN'] = nota['Tgl'].dt.month
+
+        # nilai aksesoris per nota (untuk mengukur kontribusi aksesorisnya)
+        aks_nilai = (sb[sb['IS_AKS']].groupby(['CABANG', 'NO FAKTUR'])['TOTAL HARGA']
+                     .sum().rename('Nilai Aksesoris'))
+        nota = nota.merge(aks_nilai, on=['CABANG', 'NO FAKTUR'], how='left')
+        nota['Nilai Aksesoris'] = nota['Nilai Aksesoris'].fillna(0)
+
+        tot_nota = len(nota)
+        bund = nota[nota['Bundling']]
+        non = nota[~nota['Bundling']]
+        n_bund = len(bund)
+        rate = (n_bund / tot_nota * 100) if tot_nota else 0
+
+        # peluang: nota non-aksesoris yang belum dilekati aksesoris
+        peluang = nota[(~nota['Ada Aksesoris']) & nota['Ada Lainnya']]
+
+        st.markdown(kpi_html([
+            {'label': 'Total Nota', 'value': f"{tot_nota:,}",
+             'sub': 'sesuai filter aktif',
+             'grad': 'linear-gradient(135deg,#1f3864,#2e5394)'},
+            {'label': 'Nota Bundling', 'value': f"{n_bund:,}",
+             'sub': f"attach rate {rate:.1f}%",
+             'grad': 'linear-gradient(135deg,#16a34a,#22c55e)'},
+            {'label': 'Belum Bundling', 'value': f"{len(peluang):,}",
+             'sub': 'ada barang/jasa, tanpa aksesoris',
+             'grad': 'linear-gradient(135deg,#e0921f,#e2b21a)'},
+            {'label': 'Omzet Bundling', 'value': rp(bund['Nilai'].sum()),
+             'sub': f"{(bund['Nilai'].sum()/nota['Nilai'].sum()*100 if nota['Nilai'].sum() else 0):.1f}% dari omzet",
+             'grad': 'linear-gradient(135deg,#7c3aed,#a855f7)'},
+            {'label': 'Rata-rata Nota Bundling', 'value': rp(bund['Nilai'].mean() if n_bund else 0),
+             'sub': f"non-bundling {rp(non['Nilai'].mean() if len(non) else 0)}",
+             'grad': 'linear-gradient(135deg,#0f8a82,#17a3a3)'},
+            {'label': 'Aksesoris dalam Bundling', 'value': rp(bund['Nilai Aksesoris'].sum()),
+             'sub': f"{(bund['Nilai Aksesoris'].sum()/bund['Nilai'].sum()*100 if n_bund and bund['Nilai'].sum() else 0):.1f}% dari nilai nota",
+             'grad': 'linear-gradient(135deg,#c93fa8,#d1478d)'},
+        ]), unsafe_allow_html=True)
+        st.write("")
+
+        st.caption(
+            "**Definisi:** satu nota disebut *bundling* bila memuat minimal satu item "
+            "berkategori **AKSESORIS** sekaligus minimal satu item kategori lain "
+            "(jasa, sparepart, handphone, dll), dengan total minimal 2 produk. "
+            "Satu nota dihitung sebagai kombinasi Cabang + Nomor Faktur."
+        )
+
+        b1, b2 = st.columns([1.25, 1])
+        with b1:
+            st.markdown("#### Tren Attach Rate per Bulan")
+            tren = nota.groupby('BULAN').agg(
+                total=('Bundling', 'size'), bundling=('Bundling', 'sum')).sort_index()
+            tren['rate'] = (tren['bundling'] / tren['total'] * 100).round(1)
+            figb = go.Figure()
+            figb.add_bar(x=[BULAN_NAMES[int(b)][:3] for b in tren.index],
+                         y=tren['bundling'], name='Nota bundling',
+                         marker_color='#16a34a')
+            figb.add_bar(x=[BULAN_NAMES[int(b)][:3] for b in tren.index],
+                         y=tren['total'] - tren['bundling'], name='Bukan bundling',
+                         marker_color='#d9dee9')
+            figb.add_trace(go.Scatter(
+                x=[BULAN_NAMES[int(b)][:3] for b in tren.index], y=tren['rate'],
+                name='Attach rate (%)', yaxis='y2', mode='lines+markers',
+                line=dict(color='#1f3864', width=3)))
+            figb.update_layout(
+                barmode='stack', height=360, margin=dict(l=10, r=10, t=10, b=10),
+                legend=dict(orientation='h', y=1.12),
+                yaxis=dict(title='Jumlah nota'),
+                yaxis2=dict(title='Attach rate (%)', overlaying='y', side='right',
+                            range=[0, 100]))
+            st.plotly_chart(figb, use_container_width=True, key='bund_tren')
+        with b2:
+            st.markdown("#### Komposisi Nota")
+            komp = pd.DataFrame({
+                'Jenis': ['Bundling (aksesoris + lainnya)',
+                          'Hanya aksesoris',
+                          'Hanya non-aksesoris'],
+                'Jumlah': [n_bund,
+                           int((nota['Ada Aksesoris'] & ~nota['Ada Lainnya']).sum()),
+                           int((~nota['Ada Aksesoris'] & nota['Ada Lainnya']).sum())]
+            })
+            figk = px.pie(komp, names='Jenis', values='Jumlah', hole=0.55,
+                          color_discrete_sequence=['#16a34a', '#c93fa8', '#e0921f'])
+            figk.update_layout(height=360, margin=dict(l=5, r=5, t=5, b=5),
+                               legend=dict(font=dict(size=9), orientation='h', y=-0.1))
+            st.plotly_chart(figk, use_container_width=True, key='bund_pie')
+
+        st.markdown("#### Attach Rate per Cabang")
+        gc = nota.groupby('CABANG').agg(
+            Nota=('Bundling', 'size'), Bundling=('Bundling', 'sum'),
+            Omzet=('Nilai', 'sum'), Nilai_Aksesoris=('Nilai Aksesoris', 'sum'))
+        gc['Belum Bundling'] = gc['Nota'] - gc['Bundling']
+        gc['Attach Rate %'] = (gc['Bundling'] / gc['Nota'] * 100).round(1)
+        gc = gc.sort_values('Attach Rate %', ascending=False)
+
+        cc1, cc2 = st.columns([1, 1.1])
+        with cc1:
+            st.dataframe(
+                gc[['Nota', 'Bundling', 'Belum Bundling', 'Attach Rate %',
+                    'Nilai_Aksesoris']].rename(
+                    columns={'Nilai_Aksesoris': 'Nilai Aksesoris'}).style.format(
+                    {'Nota': '{:,.0f}', 'Bundling': '{:,.0f}',
+                     'Belum Bundling': '{:,.0f}', 'Nilai Aksesoris': 'Rp {:,.0f}'}),
+                use_container_width=True, height=420, key='bund_cab')
+        with cc2:
+            gcs = gc.sort_values('Attach Rate %', ascending=True)
+            rata = rate
+            figc = go.Figure(go.Bar(
+                y=gcs.index, x=gcs['Attach Rate %'], orientation='h',
+                marker_color=['#16a34a' if v >= rata else '#e0921f'
+                              for v in gcs['Attach Rate %']],
+                text=[f"{v:.1f}%" for v in gcs['Attach Rate %']],
+                textposition='outside'))
+            figc.add_vline(x=rata, line_dash='dash', line_color='#1f3864',
+                           annotation_text=f"rata-rata {rata:.1f}%")
+            figc.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10),
+                               xaxis_title='Attach rate (%)',
+                               xaxis=dict(range=[0, max(100, gcs['Attach Rate %'].max() * 1.15)]))
+            st.plotly_chart(figc, use_container_width=True, key='bund_cab_fig')
+
+        k1, k2 = st.columns(2)
+        with k1:
+            st.markdown("#### Kategori Pendamping Aksesoris")
+            pend = (sb[~sb['IS_AKS']]
+                    .merge(bund[['CABANG', 'NO FAKTUR']], on=['CABANG', 'NO FAKTUR'])
+                    .groupby(['CABANG', 'NO FAKTUR'])['KATEGORI']
+                    .apply(lambda s: list(dict.fromkeys(s))))
+            from collections import Counter
+            cnt = Counter(k for lst in pend for k in lst)
+            dfp = (pd.DataFrame(cnt.items(), columns=['Kategori', 'Nota'])
+                   .sort_values('Nota', ascending=False).head(10))
+            dfp['% dari nota bundling'] = (dfp['Nota'] / n_bund * 100).round(1) if n_bund else 0
+            st.dataframe(dfp.style.format({'Nota': '{:,.0f}'}),
+                         use_container_width=True, height=340, hide_index=True,
+                         key='bund_pendamping')
+        with k2:
+            st.markdown("#### Aksesoris Paling Sering Di-bundling")
+            aks_top = (sb[sb['IS_AKS']]
+                       .merge(bund[['CABANG', 'NO FAKTUR']], on=['CABANG', 'NO FAKTUR'])
+                       .groupby('BARANG').agg(Nota=('QTY', 'size'), Qty=('QTY', 'sum'),
+                                              Nilai=('TOTAL HARGA', 'sum'))
+                       .sort_values('Nilai', ascending=False).head(12))
+            st.dataframe(aks_top.style.format({'Nota': '{:,.0f}', 'Qty': '{:,.0f}',
+                                               'Nilai': 'Rp {:,.0f}'}),
+                         use_container_width=True, height=340, key='bund_aks')
+
+        st.markdown("#### Attach Rate per Penjual (minimal 30 nota)")
+        gp = nota.groupby('Penjual').agg(
+            Nota=('Bundling', 'size'), Bundling=('Bundling', 'sum'),
+            Omzet=('Nilai', 'sum'))
+        gp = gp[gp['Nota'] >= 30]
+        gp['Attach Rate %'] = (gp['Bundling'] / gp['Nota'] * 100).round(1)
+        gp = gp.sort_values('Attach Rate %', ascending=False)
+        if len(gp):
+            st.dataframe(gp.style.format({'Nota': '{:,.0f}', 'Bundling': '{:,.0f}',
+                                          'Omzet': 'Rp {:,.0f}'}),
+                         use_container_width=True, height=340, key='bund_penjual')
+        else:
+            st.caption("Belum ada penjual dengan minimal 30 nota pada filter ini.")
+
+        st.markdown("#### Daftar Nota")
+        f1, f2 = st.columns([1, 2])
+        with f1:
+            saring = st.selectbox("Tampilkan", ['Semua nota', 'Hanya bundling',
+                                                'Belum bundling (peluang)'],
+                                  key='bund_saring')
+        with f2:
+            cari_b = st.text_input("Cari cabang / faktur / penjual", key='bund_cari')
+        dn = nota.copy()
+        if saring == 'Hanya bundling':
+            dn = dn[dn['Bundling']]
+        elif saring == 'Belum bundling (peluang)':
+            dn = dn[(~dn['Ada Aksesoris']) & dn['Ada Lainnya']]
+        kol = ['Tgl', 'CABANG', 'NO FAKTUR', 'Penjual', 'Baris', 'Qty',
+               'Nilai', 'Nilai Aksesoris', 'Bundling']
+        dn = dn[kol].rename(columns={'Tgl': 'Tanggal', 'CABANG': 'Cabang',
+                                     'NO FAKTUR': 'No Faktur', 'Baris': 'Jml Produk'})
+        if cari_b:
+            m = dn.apply(lambda r: cari_b.upper() in
+                         ' '.join(str(v) for v in r.values).upper(), axis=1)
+            dn = dn[m]
+        st.caption(f"{len(dn):,} nota (ditampilkan maksimal 1.000).")
+        st.dataframe(dn.sort_values('Nilai', ascending=False).head(1000),
+                     use_container_width=True, height=360, hide_index=True,
+                     key='bund_detail')
+
+        st.download_button(
+            "⬇️ Unduh rekap bundling per cabang (CSV)",
+            data=gc.reset_index().to_csv(index=False).encode('utf-8-sig'),
+            file_name="bundling_aksesoris_per_cabang.csv", mime="text/csv",
+            key='bund_unduh')
+
+        with st.expander("ℹ️ Cara perhitungan & catatan"):
+            st.write(
+                "**Satu nota** = kombinasi **Cabang + Nomor Faktur**. Ini penting karena "
+                "penomoran faktur berjalan sendiri-sendiri di tiap cabang — satu nomor "
+                "seperti `MF-FP.3974` bisa dipakai beberapa cabang berbeda.\n\n"
+                "**Nota bundling** = memuat minimal satu item berkategori AKSESORIS "
+                "(termasuk penulisan `ACCESORIES`) **dan** minimal satu item kategori "
+                "lain, dengan total minimal 2 produk pada nota tersebut.\n\n"
+                "**Attach rate** = jumlah nota bundling dibagi seluruh nota.\n\n"
+                "**Belum bundling (peluang)** = nota yang berisi barang/jasa tapi sama "
+                "sekali tidak ada aksesoris. Ini kelompok yang paling relevan untuk "
+                "didorong, karena pelanggannya sudah bertransaksi tapi belum ditawari "
+                "aksesoris.\n\n"
+                "Perlu diketahui: pasangan aksesoris paling banyak adalah **JASA** dan "
+                "**SPAREPART**, artinya sebagian besar bundling terjadi pada transaksi "
+                "servis — bukan penjualan unit baru. Angka ini memakai seluruh kategori "
+                "non-aksesoris sesuai kesepakatan.\n\n"
+                "Nilai yang dipakai adalah **TOTAL HARGA** (omzet), belum dikurangi biaya."
+            )

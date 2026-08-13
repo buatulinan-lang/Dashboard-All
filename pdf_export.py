@@ -66,6 +66,18 @@ S_KPI_V = _st("kpiv", fontSize=13, leading=16, textColor=colors.white,
 S_KPI_S = _st("kpis", fontSize=7, leading=9, textColor=colors.white)
 
 
+def _warna(v, bawaan=None):
+    """Terima warna berupa kode hex ('#1F3864') maupun objek warna ReportLab."""
+    if v is None:
+        return bawaan if bawaan is not None else NAVY
+    if isinstance(v, str):
+        try:
+            return colors.HexColor(v if v.startswith('#') else f"#{v}")
+        except Exception:
+            return bawaan if bawaan is not None else NAVY
+    return v
+
+
 def _bersih(teks):
     """Ubah penanda HTML sederhana jadi tag yang dikenali ReportLab."""
     t = str(teks)
@@ -131,7 +143,7 @@ def _kpi_grid(kpis, lebar_total):
                 isi.append([Paragraph(_bersih(k['sub']), S_KPI_S)])
             t = Table(isi, colWidths=[lebar_total / per_baris - 4 * mm])
             t.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, -1), k.get('warna', NAVY)),
+                ('BACKGROUND', (0, 0), (-1, -1), _warna(k.get('warna'), NAVY)),
                 ('LEFTPADDING', (0, 0), (-1, -1), 6),
                 ('RIGHTPADDING', (0, 0), (-1, -1), 6),
                 ('TOPPADDING', (0, 0), (-1, 0), 6),
@@ -179,7 +191,8 @@ def _tabel_banding(judul, baris, nama_baru, nama_lama, catatan, lebar):
             Paragraph(_bersih(v_lama),
                       _st(f"m{i}", fontSize=9.5, textColor=MUTED)),
             Paragraph(f"<b>{_bersih(delta)}</b>",
-                      _st(f"d{i}", fontSize=9.5, textColor=warna, alignment=2)),
+                      _st(f"d{i}", fontSize=9.5, textColor=_warna(warna, MUTED),
+                          alignment=2)),
         ])
     t = Table(data, colWidths=[lebar * 0.34, lebar * 0.22, lebar * 0.22, lebar * 0.22])
     t.setStyle(TableStyle(gaya))

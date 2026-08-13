@@ -363,6 +363,15 @@ def daftar_periode_gaji(tgl_min, tgl_max):
     return hasil
 
 
+# Warna kartu KPI pada laporan PDF. Sengaja berupa kode hex biasa supaya
+# dashboard tetap jalan walau pustaka pembuat PDF belum terpasang.
+_PN = "#1F3864"   # navy
+_PG = "#16A34A"   # hijau
+_PR = "#C0392B"   # merah
+_PA = "#D97706"   # oranye
+_PM = "#6B7280"   # abu-abu
+
+
 def nfid(v, desimal=0):
     """Angka gaya Indonesia: 68.838 · 1.234,5"""
     try:
@@ -472,7 +481,7 @@ def hitung_banding(pot, metrik):
 
     Kembalikan list dict siap pakai untuk pdf_export.build_pdf.
     """
-    from pdf_export import GREEN as PG, RED as PR, MUTED as PM
+    PG, PR, PM = _PG, _PR, _PM
     hasil = []
     if not pot:
         return hasil
@@ -521,6 +530,16 @@ def tombol_pdf(nama_dashboard, pot, metrik, temuan, kpis=None, metodologi="",
     """Tampilkan tombol unduh laporan analisa dalam bentuk PDF."""
     try:
         from pdf_export import build_pdf
+    except ModuleNotFoundError as e:
+        hilang = getattr(e, "name", "") or str(e)
+        if hilang == "pdf_export":
+            st.info("📄 Unduhan PDF belum aktif — file **pdf_export.py** belum ada "
+                    "di folder yang sama dengan app.py.")
+        else:
+            st.info(f"📄 Unduhan PDF belum aktif — pustaka **{hilang}** belum terpasang. "
+                    f"Tambahkan `reportlab>=4.0` ke **requirements.txt**, lalu reboot "
+                    f"aplikasi. (Dashboard lain tetap berjalan normal.)")
+        return
     except Exception as e:  # noqa: BLE001
         st.caption(f"Unduhan PDF tidak tersedia: {e}")
         return
@@ -912,7 +931,6 @@ def render_detail_dashboard(filtered_df, total_unique_all, *, status_bucket, jen
                     "Tidak ada pola mencolok pada filter ini."))
     panel_analisa(_an)
 
-    from pdf_export import NAVY as _PN, GREEN as _PG, RED as _PR, AMBER as _PA
     _wrn = {'DONE': _PG, 'CANCEL': _PR, 'PENDING': _PA}.get(_sb, _PN)
     _kp = [{'label': f'Jumlah {rank_label}', 'value': nfid(total_s),
             'sub': f"{pctid(porsi)} dari total", 'warna': _wrn}]
@@ -1384,7 +1402,6 @@ with tab_main:
                     "atau bandingkan antar cabang untuk melihat pola yang lebih jelas."))
     panel_analisa(_an)
 
-    from pdf_export import NAVY as _PN, GREEN as _PG, RED as _PR, AMBER as _PA
     tombol_pdf(
         "Dashboard Status Pengerjaan", _pot, _metrik_utama, _an,
         kpis=[{'label': 'Total Transaksi', 'value': nfid(total), 'sub': 'sesuai filter', 'warna': _PN},
@@ -1723,7 +1740,6 @@ with tab_jual:
             _anj.append(('info', 'Belum ada temuan menonjol', "Angka relatif stabil."))
         panel_analisa(_anj)
 
-        from pdf_export import NAVY as _PN, GREEN as _PG, RED as _PR, AMBER as _PA
         tombol_pdf("Dashboard Penjualan", _potj, _metrik_j, _anj,
                    kpis=[{'label': 'Omzet', 'value': rp(omzet), 'sub': f"{nfid(len(sj))} baris", 'warna': _PN},
                          {'label': 'Modal', 'value': rp(modal),
@@ -1947,7 +1963,6 @@ with tab_mlf:
                          f"pada menarik pelanggan datang, bukan pada labanya sendiri."))
             panel_analisa(_anm)
 
-            from pdf_export import NAVY as _PN, GREEN as _PG, RED as _PR, AMBER as _PA
             tombol_pdf("Dashboard Voucher Tiket MLF", _potm, _metrik_m, _anm,
                        kpis=[{'label': 'Voucher Terjual', 'value': nfid(qty),
                               'sub': f"{nfid(len(mlf))} transaksi", 'warna': _PN},
@@ -2325,7 +2340,6 @@ with tab_tek:
                     _ant.append(('info', 'Belum ada temuan menonjol', "Angka relatif stabil."))
                 panel_analisa(_ant)
 
-                from pdf_export import NAVY as _PN, GREEN as _PG, RED as _PR, AMBER as _PA
                 tombol_pdf("Dashboard Bagi Hasil Teknisi", _pott, _metrik_t, _ant,
                            kpis=[{'label': 'Omzet Jasa', 'value': rp(omzet_j),
                                   'sub': f"{nfid(len(jasa))} baris", 'warna': _PN},
@@ -2675,7 +2689,6 @@ with tab_bundling:
                      "selesai diperbaiki — bukan saat pembelian unit baru."))
         panel_analisa(_anb)
 
-        from pdf_export import NAVY as _PN, GREEN as _PG, RED as _PR, AMBER as _PA
         tombol_pdf("Dashboard Bundling Aksesoris", _potb, _metrik_b, _anb,
                    kpis=[{'label': 'Total Nota', 'value': nfid(tot_nota),
                           'sub': 'sesuai filter', 'warna': _PN},

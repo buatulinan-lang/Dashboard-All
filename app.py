@@ -385,6 +385,162 @@ def rp(v, singkat=True):
     return ("-" + s) if neg else s
 
 
+# ---------------------------------------------------------------------------
+# Pembanding periode (bulan ini vs bulan lalu, tahun ini vs tahun lalu)
+# ---------------------------------------------------------------------------
+def potong_periode(df: pd.DataFrame, kol_tgl: str):
+    """Siapkan potongan data yang setara untuk perbandingan MoM & YoY.
+
+    Bulan berjalan biasanya belum penuh, jadi bulan pembanding ikut dipotong
+    pada tanggal yang sama. Hari terakhir dibuang bila datanya jauh di bawah
+    kebiasaan (tanda data belum lengkap sehari penuh).
+    """
+    if df is None or df.empty or kol_tgl not in df.columns:
+        return None
+    t = df[kol_tgl].dropna()
+    if t.empty:
+        return None
+
+    tmax = t.max()
+    th, bl = int(tmax.year), int(tmax.month)
+    hb = t[(t.dt.year == th) & (t.dt.month == bl)].dt.day.value_counts().sort_index()
+    hari_n = int(tmax.day)
+    dibuang = None
+    if len(hb) >= 3 and hb.get(hari_n, 0) < 0.4 * hb.iloc[:-1].median():
+        dibuang = hari_n
+        hari_n -= 1
+
+    bl_p, th_p = (bl - 1, th) if bl > 1 else (12, th - 1)
+    tg = df[kol_tgl]
+
+    def rng(bulan, tahun):
+        return df[(tg.dt.year == tahun) & (tg.dt.month == bulan) & (tg.dt.day <= hari_n)]
+
+    # YTD: 1 Januari s/d tanggal & bulan yang sama
+    def ytd(tahun):
+        return df[(tg.dt.year == tahun) &
+                  ((tg.dt.month < bl) |
+                   ((tg.dt.month == bl) & (tg.dt.day <= hari_n)))]
+
+    return {
+        'bulan_ini': rng(bl, th), 'bulan_lalu': rng(bl_p, th_p),
+        'tahun_ini': ytd(th), 'tahun_lalu': ytd(th - 1),
+        'nama_bulan_ini': f"{BULAN_NAMES[bl]} {th}",
+        'nama_bulan_lalu': f"{BULAN_NAMES[bl_p]} {th_p}",
+        'nama_tahun_ini': str(th), 'nama_tahun_lalu': str(th - 1),
+        'hari_n': hari_n, 'hari_dibuang': dibuang, 'bulan': bl, 'tahun': th,
+    }
+
+
+def _delta_html(baru, lama, fmt, higher_better=True, satuan=""):
+    """Satu baris perbandingan: nilai baru, nilai lama, dan selisihnya."""
+    if lama in (None, 0) or pd.isna(lama):
+        badge = "<span style='color:#6b7280'>—</span>"
+    else:
+        p = (baru - lama) / abs(lama) * 100
+        naik = p > 0
+        baik = naik if higher_better else (not naik)
+        warna = '#16a34a' if (baik and abs(p) > 0.05) else ('#dc2626' if abs(p) > 0.05 else '#6b7280')
+        panah = '▲' if naik else ('▼' if p < 0 else '■')
+        badge = (f"<span style='color:{warna};font-weight:700'>{panah} "
+                 f"{abs(p):.1f}%".replace('.', ',') + "</span>")
+    return (f"<td style='padding:6px 10px;font-weight:700'>{fmt(baru)}{satuan}</td>"
+            f"<td style='padding:6px 10px;color:#6b7280'>{fmt(lama)}{satuan}</td>"
+            f"<td style='padding:6px 10px;text-align:right'>{badge}</td>")
+
+
+def render_banding(pot, metrik, key_prefix=""):
+    """Tampilkan tabel perbandingan MoM & YoY.
+
+    metrik: list of (nama, fungsi(df)->angka, formatter, higher_better)
+    """
+    if not pot:
+        st.caption("Data tanggal tidak tersedia untuk perbandingan periode.")
+        return
+
+    def tabel(judul, a_df, b_df, nama_a, nama_b, catatan):
+        rows = []
+        for nama, fn, fmt, hb in metrik:
+            try:
+                va, vb = fn(b_df), fn(a_df)   # b_df = periode lama
+            except Exception:
+                continue
+            rows.append(
+                f"<tr><td style='padding:6px 10px;color:#20242e'>{nama}</td>"
+                + _delta_html(va, vb, fmt, hb) + "</tr>")
+        if not rows:
+            return ""
+        return f"""
+        <div style="background:#fff;border:1px solid #e3e7f0;border-radius:12px;
+                    padding:12px 14px;height:100%">
+          <div style="font-weight:800;color:#1f3864;font-size:13px;margin-bottom:8px">{judul}</div>
+          <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+            <tr style="color:#6b7280;font-size:10.5px;text-transform:uppercase;
+                       letter-spacing:.03em">
+              <th style="text-align:left;padding:4px 10px">Metrik</th>
+              <th style="text-align:left;padding:4px 10px">{nama_a}</th>
+              <th style="text-align:left;padding:4px 10px">{nama_b}</th>
+              <th style="text-align:right;padding:4px 10px">Selisih</th>
+            </tr>
+            {''.join(rows)}
+          </table>
+          <div style="font-size:10.5px;color:#6b7280;margin-top:8px">{catatan}</div>
+        </div>"""
+
+    cat_mom = (f"Dibandingkan setara: tanggal 1–{pot['hari_n']} pada kedua bulan."
+               + (f" Tanggal {pot['hari_dibuang']} dikecualikan karena datanya belum "
+                  "lengkap sehari penuh." if pot['hari_dibuang'] else ""))
+    cat_yoy = (f"Dibandingkan setara: 1 Januari – {pot['hari_n']} "
+               f"{BULAN_NAMES[pot['bulan']]} pada kedua tahun.")
+
+    kosong_yoy = pot['tahun_lalu'].empty
+    c1, c2 = st.columns(2)
+    with c1:
+        html = tabel("📅 Bulan Ini vs Bulan Lalu", pot['bulan_lalu'], pot['bulan_ini'],
+                     pot['nama_bulan_ini'], pot['nama_bulan_lalu'], cat_mom)
+        st.markdown(html, unsafe_allow_html=True)
+    with c2:
+        if kosong_yoy:
+            st.markdown(
+                f"""<div style="background:#fffaf0;border:1px dashed #f0d9a8;
+                     border-radius:12px;padding:14px;height:100%">
+                  <div style="font-weight:800;color:#7a5b18;font-size:13px">
+                    📆 Tahun Ini vs Tahun Lalu</div>
+                  <div style="font-size:12px;color:#7a5b18;margin-top:8px;line-height:1.6">
+                    Tidak bisa dibandingkan — data {pot['nama_tahun_lalu']} tidak tersedia
+                    pada sumber ini. Perbandingan antar tahun baru bisa dilakukan setelah
+                    ada data periode sebelumnya.</div>
+                </div>""", unsafe_allow_html=True)
+        else:
+            html = tabel("📆 Tahun Ini vs Tahun Lalu", pot['tahun_lalu'], pot['tahun_ini'],
+                         pot['nama_tahun_ini'], pot['nama_tahun_lalu'], cat_yoy)
+            st.markdown(html, unsafe_allow_html=True)
+
+
+def panel_analisa(items):
+    """Kotak 'Analisa & Tindak Lanjut'. items: list of (jenis, judul, isi).
+
+    jenis: 'baik' | 'perhatian' | 'aksi' | 'info'
+    """
+    warna = {
+        'baik':      ('#f2fbf5', '#b9e8c9', '#0f5132', '✅'),
+        'perhatian': ('#fff8ec', '#f0d9a8', '#7a5b18', '⚠️'),
+        'aksi':      ('#fdf3f2', '#ebcfcb', '#7a2a24', '🎯'),
+        'info':      ('#f7f9fd', '#e3e7f0', '#1f3864', 'ℹ️'),
+    }
+    blok = []
+    for jenis, judul, isi in items:
+        bg, br, tx, ik = warna.get(jenis, warna['info'])
+        blok.append(f"""
+        <div style="background:{bg};border:1px solid {br};border-radius:12px;
+                    padding:12px 14px;margin-bottom:10px">
+          <div style="font-weight:800;color:{tx};font-size:13px;margin-bottom:4px">
+            {ik} {judul}</div>
+          <div style="font-size:12.5px;color:{tx};line-height:1.65">{isi}</div>
+        </div>""")
+    st.markdown("".join(blok), unsafe_allow_html=True)
+
+
 def apply_filters(df: pd.DataFrame, tahun, bulan, cabang) -> pd.DataFrame:
     out = df
     if tahun != 'Semua Tahun':
@@ -565,6 +721,94 @@ def render_detail_dashboard(filtered_df, total_unique_all, *, status_bucket, jen
         detail_df = detail_df[mask]
     st.dataframe(detail_df.sort_values('TGL PENGIRIMAN', ascending=False), use_container_width=True,
                  height=350, key=f"{key_prefix}_detail")
+
+    # ---------- perbandingan periode ----------
+    st.markdown("### 📊 Perbandingan Periode")
+    _pot = potong_periode(filtered_df, 'TGL PENGIRIMAN')
+    _sb = status_bucket
+    render_banding(_pot, [
+        (f"Jumlah {rank_label}", lambda x: int((x['STATUS_BUCKET'] == _sb).sum()),
+         lambda v: f"{v:,.0f}", (_sb == 'DONE')),
+        (f"% {rank_label} dari total",
+         lambda x: (x['STATUS_BUCKET'] == _sb).mean() * 100 if len(x) else 0,
+         lambda v: f"{v:.1f}%".replace('.', ','), (_sb == 'DONE')),
+        ("Total transaksi", lambda x: len(x), lambda v: f"{v:,.0f}", True),
+    ], key_prefix=key_prefix)
+
+    # ---------- analisa otomatis ----------
+    st.markdown("### 🧭 Analisa & Tindak Lanjut")
+    _an = []
+    if _pot and not _pot['bulan_ini'].empty and not _pot['bulan_lalu'].empty:
+        n_i = int((_pot['bulan_ini']['STATUS_BUCKET'] == _sb).sum())
+        n_l = int((_pot['bulan_lalu']['STATUS_BUCKET'] == _sb).sum())
+        p_i = (_pot['bulan_ini']['STATUS_BUCKET'] == _sb).mean() * 100
+        p_l = (_pot['bulan_lalu']['STATUS_BUCKET'] == _sb).mean() * 100
+        if _sb == 'PENDING':
+            _an.append(('info', 'Cara membaca angka pending',
+                        "Pending adalah <b>kondisi terkini</b>, bukan kejadian pada bulan "
+                        "tersebut. Pendingan bulan lalu sebagian sudah tuntas sehingga "
+                        "selalu tampak lebih kecil — jadi kenaikan angka di sini "
+                        "<b>bukan berarti kinerja memburuk</b>. Yang perlu dilihat adalah "
+                        "besarnya tumpukan saat ini dan di mana konsentrasinya."))
+        elif n_l:
+            selisih = (n_i - n_l) / n_l * 100
+            baik = (selisih > 0) if _sb == 'DONE' else (selisih < 0)
+            _an.append(('baik' if baik else 'perhatian',
+                        f'{rank_label} {"naik" if selisih > 0 else "turun"} '
+                        f'{abs(selisih):.1f}% dibanding bulan lalu',
+                        f"Dari {n_l:,} menjadi {n_i:,} unit (porsi {p_l:.1f}% → {p_i:.1f}%). "
+                        + ("<b>Tindakan:</b> pertahankan dan bakukan praktik yang berjalan."
+                           if baik else
+                           "<b>Tindakan:</b> telusuri penyebabnya pada cabang dengan "
+                           "perubahan terbesar.")))
+
+    if total_s:
+        tek_r = sub[~sub['TEKNISI'].isin(['TIDAK ADA TEKNISI', 'N/A'])]['TEKNISI'].value_counts()
+        cab_r = sub['CABANG'].value_counts()
+        ker_r = sub['KERUSAKAN'].value_counts()
+        if _sb == 'PENDING':
+            dua = cab_r.head(2)
+            porsi = dua.sum() / total_s * 100
+            _an.append(('aksi', 'Prioritaskan dua cabang ini',
+                        f"<b>{dua.index[0]}</b> ({dua.iloc[0]} unit) dan "
+                        f"<b>{dua.index[1]}</b> ({dua.iloc[1]} unit) menyumbang "
+                        f"{porsi:.1f}% dari seluruh pendingan. <b>Tindakan:</b> "
+                        f"penelusuran di dua titik ini memberi dampak terbesar."))
+            _an.append(('aksi', f'Kerusakan {ker_r.index[0]} paling menumpuk',
+                        f"{ker_r.iloc[0]} unit ({ker_r.iloc[0]/total_s*100:.1f}% pendingan). "
+                        f"<b>Tindakan:</b> cek ketersediaan sparepart dan kejelasan "
+                        f"estimasi biaya untuk jenis kerusakan ini."))
+        elif _sb == 'CANCEL':
+            _an.append(('aksi', f'Kerusakan {ker_r.index[0]} paling sering dibatalkan',
+                        f"{ker_r.iloc[0]} unit ({ker_r.iloc[0]/total_s*100:.1f}% pembatalan). "
+                        f"<b>Tindakan:</b> sampaikan estimasi biaya lebih awal untuk "
+                        f"jenis ini agar pelanggan tidak menunggu lama sebelum membatalkan."))
+            _an.append(('perhatian', f'Pembatalan terbanyak di {cab_r.index[0]}',
+                        f"{cab_r.iloc[0]} unit ({cab_r.iloc[0]/total_s*100:.1f}%). "
+                        f"<b>Tindakan:</b> bandingkan harga dan waktu tunggu cabang ini "
+                        f"dengan cabang yang pembatalannya rendah."))
+        else:  # DONE
+            if len(tek_r):
+                _an.append(('baik', 'Teknisi paling produktif',
+                            f"<b>{tek_r.index[0]}</b> menyelesaikan {tek_r.iloc[0]:,} unit. "
+                            f"<b>Tindakan:</b> pelajari cara kerjanya untuk dijadikan "
+                            f"acuan pelatihan teknisi lain."))
+            _an.append(('info', 'Beban kerja terbesar',
+                        f"Kerusakan <b>{ker_r.index[0]}</b> menyumbang "
+                        f"{ker_r.iloc[0]/total_s*100:.1f}% penyelesaian. "
+                        f"<b>Tindakan:</b> pastikan stok sparepart jenis ini aman."))
+
+        tanpa = (sub['TEKNISI'] == 'TIDAK ADA TEKNISI').sum()
+        if tanpa > total_s * 0.05:
+            _an.append(('perhatian', 'Banyak baris tanpa nama teknisi',
+                        f"{tanpa:,} baris ({tanpa/total_s*100:.1f}%) tidak tercatat "
+                        f"teknisinya. <b>Tindakan:</b> rapikan pengisian di sumber data "
+                        f"agar penilaian kinerja per teknisi akurat."))
+
+    if not _an:
+        _an.append(('info', 'Belum ada temuan menonjol',
+                    "Tidak ada pola mencolok pada filter ini."))
+    panel_analisa(_an)
 
     with st.expander("ℹ️ Catatan metodologi"):
         st.write(note_text)
@@ -894,6 +1138,132 @@ with tab_main:
         use_container_width=True
     )
 
+    # ---------- perbandingan periode ----------
+    st.markdown("### 📊 Perbandingan Periode")
+    _pot = potong_periode(filtered, 'TGL PENGIRIMAN')
+    render_banding(_pot, [
+        ("Total transaksi", lambda x: len(x), lambda v: f"{v:,.0f}", True),
+        ("Selesai (Done)", lambda x: int((x['STATUS_BUCKET'] == 'DONE').sum()),
+         lambda v: f"{v:,.0f}", True),
+        ("Batal (Cancel)", lambda x: int((x['STATUS_BUCKET'] == 'CANCEL').sum()),
+         lambda v: f"{v:,.0f}", False),
+        ("% Penyelesaian", lambda x: (x['STATUS_BUCKET'] == 'DONE').mean() * 100 if len(x) else 0,
+         lambda v: f"{v:.1f}%".replace('.', ','), True),
+        ("% Pembatalan", lambda x: (x['STATUS_BUCKET'] == 'CANCEL').mean() * 100 if len(x) else 0,
+         lambda v: f"{v:.1f}%".replace('.', ','), False),
+    ], key_prefix='main')
+
+    # ---------- analisa otomatis ----------
+    st.markdown("### 🧭 Analisa & Tindak Lanjut")
+    _an = []
+    if _pot and not _pot['bulan_ini'].empty and not _pot['bulan_lalu'].empty:
+        bi, bl_ = _pot['bulan_ini'], _pot['bulan_lalu']
+        g_vol = (len(bi) - len(bl_)) / len(bl_) * 100 if len(bl_) else 0
+        dr_i = (bi['STATUS_BUCKET'] == 'DONE').mean() * 100
+        dr_l = (bl_['STATUS_BUCKET'] == 'DONE').mean() * 100
+        cr_i = (bi['STATUS_BUCKET'] == 'CANCEL').mean() * 100
+        cr_l = (bl_['STATUS_BUCKET'] == 'CANCEL').mean() * 100
+
+        # Transaksi bulan berjalan belum sempat selesai semua, sehingga %Done
+        # bulan terbaru SELALU tampak lebih rendah. Bedakan efek ini dari
+        # penurunan kinerja yang sesungguhnya.
+        blm_i = 100 - dr_i - cr_i          # porsi belum tuntas (pending + lainnya)
+        blm_l = 100 - dr_l - cr_l
+        efek_matang = (blm_i - blm_l) > 3
+
+        if efek_matang:
+            _an.append(('info', 'Penurunan %Done bulan ini sebagian besar semu',
+                        f"Porsi transaksi yang belum tuntas naik dari {blm_l:.1f}% ke "
+                        f"{blm_i:.1f}%, karena pekerjaan {_pot['nama_bulan_ini']} memang "
+                        f"belum sempat diselesaikan semua saat data ditarik. "
+                        f"Jadi turunnya %Done dari {dr_l:.1f}% ke {dr_i:.1f}% "
+                        f"<b>belum tentu berarti kinerja memburuk</b>. Yang lebih andal "
+                        f"dibandingkan adalah <b>jumlah transaksi masuk</b> dan "
+                        f"<b>jumlah unit selesai</b>, bukan persentasenya."))
+
+        if g_vol > 5 and dr_i < dr_l - 1 and not efek_matang:
+            _an.append(('aksi', 'Volume naik tapi penyelesaian tertinggal',
+                        f"Transaksi naik {g_vol:.1f}% dibanding {_pot['nama_bulan_lalu']}, "
+                        f"namun tingkat penyelesaian justru turun dari {dr_l:.1f}% ke "
+                        f"{dr_i:.1f}%, dan itu <b>bukan</b> sekadar efek pekerjaan yang "
+                        f"belum matang. <b>Tindakan:</b> cek antrean di cabang dengan "
+                        f"kenaikan tertinggi dan pertimbangkan penambahan shift atau "
+                        f"pengalihan teknisi sementara."))
+        elif g_vol > 5:
+            _an.append(('baik', 'Volume tumbuh dengan mutu terjaga',
+                        f"Transaksi naik {g_vol:.1f}% dan penyelesaian bertahan di "
+                        f"{dr_i:.1f}%. <b>Tindakan:</b> pertahankan pola kerja saat ini; "
+                        f"jadikan cabang berkinerja terbaik sebagai acuan."))
+        elif g_vol < -5:
+            _an.append(('perhatian', 'Volume transaksi menurun',
+                        f"Transaksi turun {abs(g_vol):.1f}% dibanding "
+                        f"{_pot['nama_bulan_lalu']}. <b>Tindakan:</b> telusuri apakah "
+                        f"karena musiman, berkurangnya promosi, atau persaingan di "
+                        f"cabang tertentu."))
+
+        if cr_i > cr_l + 1 and not efek_matang:
+            _an.append(('aksi', 'Pembatalan meningkat',
+                        f"Porsi pembatalan naik dari {cr_l:.1f}% ke {cr_i:.1f}%. "
+                        f"<b>Tindakan:</b> periksa kecepatan pemberian estimasi biaya dan "
+                        f"lama waktu tunggu, dua hal yang paling sering memicu batal."))
+        elif cr_i < cr_l - 1 and not efek_matang:
+            _an.append(('baik', 'Pembatalan menurun',
+                        f"Porsi pembatalan turun dari {cr_l:.1f}% ke {cr_i:.1f}%. "
+                        f"<b>Tindakan:</b> catat perubahan proses yang berjalan bulan ini "
+                        f"agar bisa dibakukan ke cabang lain."))
+
+        # pembanding yang lebih tahan efek pematangan: jumlah unit selesai
+        n_done_i = int((bi['STATUS_BUCKET'] == 'DONE').sum())
+        n_done_l = int((bl_['STATUS_BUCKET'] == 'DONE').sum())
+        if n_done_l:
+            gd = (n_done_i - n_done_l) / n_done_l * 100
+            _an.append(('baik' if gd >= 0 else 'perhatian',
+                        f"Unit selesai {'naik' if gd >= 0 else 'turun'} {abs(gd):.1f}% "
+                        f"(pembanding yang lebih andal)",
+                        f"{n_done_l:,} → {n_done_i:,} unit pada rentang tanggal yang sama. "
+                        f"Angka mutlak seperti ini tidak terpengaruh pekerjaan yang belum "
+                        f"matang, sehingga lebih layak dipakai menilai kinerja bulanan."))
+
+    # cabang yang perlu perhatian
+    if len(filtered):
+        _rk = filtered.groupby('CABANG')['STATUS_BUCKET'].agg(
+            n='size', done=lambda s: (s == 'DONE').mean() * 100,
+            cancel=lambda s: (s == 'CANCEL').mean() * 100)
+        _rk = _rk[_rk['n'] >= 100]
+        if len(_rk) >= 3:
+            _rata_done = (filtered['STATUS_BUCKET'] == 'DONE').mean() * 100
+            _buruk = _rk.nsmallest(2, 'done')
+            _nm = ", ".join(f"{i} ({r.done:.1f}%)" for i, r in _buruk.iterrows())
+            _an.append(('perhatian', 'Cabang dengan penyelesaian terendah',
+                        f"{_nm} — di bawah rata-rata {_rata_done:.1f}%. "
+                        f"<b>Tindakan:</b> tinjau beban per teknisi dan ketersediaan "
+                        f"sparepart di cabang tersebut."))
+            _tinggi = _rk.nlargest(1, 'cancel')
+            for i, r in _tinggi.iterrows():
+                if r.cancel > filtered['STATUS_BUCKET'].eq('CANCEL').mean() * 100 + 3:
+                    _an.append(('aksi', f'Pembatalan tertinggi di {i}',
+                                f"Pembatalan {r.cancel:.1f}%, jauh di atas rata-rata "
+                                f"{filtered['STATUS_BUCKET'].eq('CANCEL').mean()*100:.1f}%. "
+                                f"<b>Tindakan:</b> wawancarai admin cabang soal alasan "
+                                f"pelanggan membatalkan."))
+
+    # pending menumpuk
+    _pd = filtered[filtered['STATUS_BUCKET'] == 'PENDING']
+    if len(_pd):
+        _pc = _pd['CABANG'].value_counts()
+        _pk = _pd['KERUSAKAN'].value_counts()
+        _an.append(('aksi', f'{len(_pd):,} unit masih tertahan',
+                    f"Terbanyak di <b>{_pc.index[0]}</b> ({_pc.iloc[0]} unit) dengan "
+                    f"kerusakan dominan <b>{_pk.index[0]}</b> ({_pk.iloc[0]} unit). "
+                    f"<b>Tindakan:</b> jadikan dua titik ini prioritas penyelesaian "
+                    f"pekan ini sebelum berkembang jadi komplain."))
+
+    if not _an:
+        _an.append(('info', 'Belum ada temuan menonjol',
+                    "Angka pada filter ini relatif stabil. Perluas rentang filter "
+                    "atau bandingkan antar cabang untuk melihat pola yang lebih jelas."))
+    panel_analisa(_an)
+
     with st.expander("ℹ️ Catatan metodologi"):
         st.write(
             "Baris dengan seluruh kolom identik dianggap 1 transaksi. Pengelompokan status: **Done** mencakup "
@@ -1146,6 +1516,74 @@ with tab_jual:
         st.caption(f"{len(dd):,} baris ditampilkan (maksimal 1.000).")
         st.dataframe(dd.head(1000), use_container_width=True, height=360, key='jual_detail')
 
+        # ---------- perbandingan periode ----------
+        st.markdown("### 📊 Perbandingan Periode")
+        _potj = potong_periode(sj, 'TGL')
+        render_banding(_potj, [
+            ("Omzet", lambda x: x['TOTAL HARGA'].sum(), lambda v: rp(v), True),
+            ("Modal", lambda x: x['MODAL'].sum(), lambda v: rp(v), False),
+            ("Laba kotor", lambda x: x['LABA'].sum(), lambda v: rp(v), True),
+            ("Margin", lambda x: (x['LABA'].sum() / x['TOTAL HARGA'].sum() * 100)
+             if x['TOTAL HARGA'].sum() else 0,
+             lambda v: f"{v:.1f}%".replace('.', ','), True),
+            ("Jumlah nota", lambda x: x.groupby(['CABANG', 'NO FAKTUR']).ngroups,
+             lambda v: f"{v:,.0f}", True),
+        ], key_prefix='jual')
+
+        st.markdown("### 🧭 Analisa & Tindak Lanjut")
+        _anj = []
+        if _potj and not _potj['bulan_ini'].empty and not _potj['bulan_lalu'].empty:
+            bi, bl_ = _potj['bulan_ini'], _potj['bulan_lalu']
+            o_i, o_l = bi['TOTAL HARGA'].sum(), bl_['TOTAL HARGA'].sum()
+            m_i = bi['LABA'].sum() / o_i * 100 if o_i else 0
+            m_l = bl_['LABA'].sum() / o_l * 100 if o_l else 0
+            g = (o_i - o_l) / o_l * 100 if o_l else 0
+            if g > 3 and m_i < m_l - 1:
+                _anj.append(('aksi', 'Omzet naik tapi margin tergerus',
+                             f"Omzet naik {g:.1f}% namun margin turun dari {m_l:.1f}% ke "
+                             f"{m_i:.1f}%. Kemungkinan komposisi bergeser ke barang "
+                             f"bermargin tipis. <b>Tindakan:</b> tinjau harga jual "
+                             f"kategori bervolume besar dan dorong item bermargin tinggi."))
+            elif g > 3:
+                _anj.append(('baik', 'Omzet tumbuh sehat',
+                             f"Omzet naik {g:.1f}% dengan margin {m_i:.1f}%. "
+                             f"<b>Tindakan:</b> pertahankan bauran produk saat ini."))
+            elif g < -3:
+                _anj.append(('perhatian', 'Omzet menurun',
+                             f"Omzet turun {abs(g):.1f}% dibanding "
+                             f"{_potj['nama_bulan_lalu']}. <b>Tindakan:</b> periksa cabang "
+                             f"penyumbang penurunan terbesar."))
+
+        _gk2 = sj.groupby('KATEGORI').agg(om=('TOTAL HARGA', 'sum'), lb=('LABA', 'sum'))
+        _gk2 = _gk2[_gk2['om'] > 0]
+        _gk2['mg'] = _gk2['lb'] / _gk2['om'] * 100
+        _brg = _gk2.drop(index=['JASA'], errors='ignore')
+        if len(_brg):
+            _low = _brg[_brg['om'] >= _brg['om'].max() * 0.1].nsmallest(1, 'mg')
+            for i, r in _low.iterrows():
+                _anj.append(('perhatian', f'Margin {i} paling tipis',
+                             f"Hanya {r.mg:.1f}% dari omzet {rp(r.om)}. "
+                             f"<b>Tindakan:</b> negosiasi ulang harga beli atau sesuaikan "
+                             f"harga jual — kategori ini bervolume besar sehingga "
+                             f"perbaikan kecil berdampak besar."))
+        if 'JASA' in _gk2.index:
+            _pj = _gk2.loc['JASA', 'om'] / sj['TOTAL HARGA'].sum() * 100
+            _anj.append(('info', 'Hati-hati membaca margin JASA',
+                         f"JASA menyumbang {_pj:.1f}% omzet dengan margin tampil "
+                         f"~100% karena biaya tenaga kerja tidak dibebankan per faktur. "
+                         f"<b>Jangan</b> dibandingkan langsung dengan margin barang."))
+
+        _rug = (sj['LABA'] < 0).sum()
+        if _rug:
+            _anj.append(('aksi', f'{_rug:,} baris terjual rugi',
+                         f"{_rug/len(sj)*100:.1f}% baris punya harga jual di bawah modal "
+                         f"(total {rp(sj.loc[sj['LABA'] < 0, 'LABA'].sum())}). "
+                         f"<b>Tindakan:</b> cek apakah salah input harga atau memang "
+                         f"diskon berlebih."))
+        if not _anj:
+            _anj.append(('info', 'Belum ada temuan menonjol', "Angka relatif stabil."))
+        panel_analisa(_anj)
+
         with st.expander("ℹ️ Catatan metodologi"):
             st.write(
                 "**Modal** diambil dari kolom `HARGA BELI`, yang di sumber data ini sudah berupa "
@@ -1294,6 +1732,60 @@ with tab_mlf:
                 dm = dm[mask]
             st.caption(f"{len(dm):,} baris ditampilkan (maksimal 1.000).")
             st.dataframe(dm.head(1000), use_container_width=True, height=340, key='mlf_detail')
+
+            # ---------- perbandingan periode ----------
+            st.markdown("### 📊 Perbandingan Periode")
+            _potm = potong_periode(mlf, 'TGL')
+            render_banding(_potm, [
+                ("Voucher terjual", lambda x: x['QTY'].sum(), lambda v: f"{v:,.0f}", True),
+                ("Transaksi", lambda x: len(x), lambda v: f"{v:,.0f}", True),
+                ("Omzet", lambda x: x['TOTAL HARGA'].sum(), lambda v: rp(v), True),
+                ("Laba kotor", lambda x: x['LABA'].sum(), lambda v: rp(v), True),
+                ("Cabang menjual", lambda x: x['CABANG'].nunique(),
+                 lambda v: f"{v:,.0f}", True),
+            ], key_prefix='mlf')
+
+            st.markdown("### 🧭 Analisa & Tindak Lanjut")
+            _anm = []
+            if _potm and not _potm['bulan_ini'].empty and not _potm['bulan_lalu'].empty:
+                q_i = _potm['bulan_ini']['QTY'].sum()
+                q_l = _potm['bulan_lalu']['QTY'].sum()
+                if q_l:
+                    g = (q_i - q_l) / q_l * 100
+                    _anm.append(('baik' if g > 0 else 'perhatian',
+                                 f"Penjualan voucher {'naik' if g > 0 else 'turun'} "
+                                 f"{abs(g):.1f}% dibanding bulan lalu",
+                                 f"Dari {q_l:,.0f} menjadi {q_i:,.0f} voucher. "
+                                 + ("<b>Tindakan:</b> pertahankan dorongan penjualan dan "
+                                    "tiru pola cabang terbaik." if g > 0 else
+                                    "<b>Tindakan:</b> cek apakah stok voucher tersedia dan "
+                                    "apakah penawaran masih rutin disampaikan ke pelanggan.")))
+
+            _semua_cab = set(sales['CABANG'].unique())
+            _jual_cab = set(mlf['CABANG'].unique())
+            _belum = sorted(_semua_cab - _jual_cab)
+            if _belum:
+                _anm.append(('aksi', f'{len(_belum)} cabang belum menjual sama sekali',
+                             f"{', '.join(_belum)}. <b>Tindakan:</b> pastikan stok voucher "
+                             f"terdistribusi dan tim di sana sudah diberi pengarahan."))
+
+            _pcab = mlf.groupby('CABANG')['QTY'].sum().sort_values(ascending=False)
+            if len(_pcab) >= 3:
+                _rata = _pcab.mean()
+                _bawah = _pcab[_pcab < _rata * 0.6]
+                if len(_bawah):
+                    _anm.append(('perhatian', 'Cabang jauh di bawah rata-rata',
+                                 f"{', '.join(f'{i} ({int(v)})' for i, v in _bawah.head(4).items())} "
+                                 f"— rata-rata cabang {_rata:.0f} voucher. "
+                                 f"<b>Tindakan:</b> samakan cara penawaran dengan "
+                                 f"<b>{_pcab.index[0]}</b> yang mencapai {int(_pcab.iloc[0])}."))
+
+            _mg = (laba / omzet * 100) if omzet else 0
+            _anm.append(('info', f'Margin voucher {_mg:.1f}%',
+                         f"Dari omzet {rp(omzet)} diperoleh laba {rp(laba)}. Margin voucher "
+                         f"memang tipis karena harga belinya sudah tinggi — nilainya lebih "
+                         f"pada menarik pelanggan datang, bukan pada labanya sendiri."))
+            panel_analisa(_anm)
 
             with st.expander("ℹ️ Catatan metodologi"):
                 nm = mlf['BARANG'].value_counts()
@@ -1585,6 +2077,76 @@ with tab_tek:
                 st.caption(f"{len(dt):,} baris ditampilkan (maksimal 1.000).")
                 st.dataframe(dt.head(1000), use_container_width=True, height=360, key='tek_detail')
 
+                # ---------- perbandingan periode ----------
+                st.markdown("### 📊 Perbandingan Periode")
+                _pott = potong_periode(jasa_all, 'TGL')
+                render_banding(_pott, [
+                    ("Omzet jasa", lambda x: x['TOTAL HARGA'].sum(), lambda v: rp(v), True),
+                    ("Bagi hasil (aturan)", lambda x: x['BAGI_HASIL'].sum(),
+                     lambda v: rp(v), True),
+                    ("Pembanding flat", lambda x: x['BAGI_HASIL_FLAT'].sum(),
+                     lambda v: rp(v), True),
+                    ("Tarif efektif", lambda x: (x['BAGI_HASIL'].sum() /
+                                                 x['TOTAL HARGA'].sum() * 100)
+                     if x['TOTAL HARGA'].sum() else 0,
+                     lambda v: f"{v:.1f}%".replace('.', ','), False),
+                    ("Teknisi aktif",
+                     lambda x: x.loc[x['TEKNISI'] != 'TIDAK ADA TEKNISI', 'TEKNISI'].nunique(),
+                     lambda v: f"{v:,.0f}", True),
+                ], key_prefix='tek')
+
+                st.markdown("### 🧭 Analisa & Tindak Lanjut")
+                _ant = []
+                if selisih < 0:
+                    _ant.append(('baik', 'Skema aturan lebih hemat dari flat',
+                                 f"Selisih {rp(abs(selisih))} lebih rendah dibanding skema "
+                                 f"flat {tarif_flat:.0f}% ({abs(selisih)/bh_flat*100:.1f}%). "
+                                 f"Penyebabnya porsi <b>Interface</b> yang bertarif rendah "
+                                 f"cukup besar. <b>Tindakan:</b> pastikan pembagian jenis "
+                                 f"pekerjaan sudah adil bagi teknisi agar tidak memicu keluhan."))
+                elif selisih > 0:
+                    _ant.append(('perhatian', 'Skema aturan lebih mahal dari flat',
+                                 f"Selisih {rp(selisih)} lebih tinggi dibanding skema flat "
+                                 f"{tarif_flat:.0f}%. <b>Tindakan:</b> tinjau apakah tarif "
+                                 f"Promo/Mati Total masih sepadan dengan nilai pekerjaannya."))
+
+                if n_kw == 0:
+                    _ant.append(('aksi', 'Penamaan barang belum memakai kata kunci',
+                                 "Tidak ada item berkata kunci pada periode ini, sehingga "
+                                 "seluruh skema tarif tidak berpengaruh. <b>Tindakan:</b> "
+                                 "seragamkan penamaan item jasa di sistem (format "
+                                 "<code>JS ... - INTERFACE/NORMAL</code>) agar aturan bagi "
+                                 "hasil benar-benar berjalan."))
+                elif n_kw < len(jasa) * 0.8:
+                    _ant.append(('aksi', 'Penamaan belum seragam',
+                                 f"Baru {n_kw/len(jasa)*100:.0f}% baris memakai penamaan "
+                                 f"berkata kunci; sisanya jatuh ke tarif default "
+                                 f"{tarif_lain:.0f}%. <b>Tindakan:</b> lanjutkan migrasi "
+                                 f"penamaan agar perhitungan makin tepat."))
+
+                _tk = gt[gt.index != 'TIDAK ADA TEKNISI']
+                if len(_tk) >= 5:
+                    _q1 = _tk['Bagi_Hasil'].quantile(0.25)
+                    _bwh = _tk[_tk['Bagi_Hasil'] <= _q1]
+                    _ant.append(('info', 'Sebaran bagi hasil antar teknisi',
+                                 f"Tertinggi {rp(_tk['Bagi_Hasil'].max())} "
+                                 f"(<b>{_tk['Bagi_Hasil'].idxmax()}</b>), terendah "
+                                 f"{rp(_tk['Bagi_Hasil'].min())}. Seperempat teknisi "
+                                 f"({len(_bwh)} orang) di bawah {rp(_q1)}. "
+                                 f"<b>Tindakan:</b> cek apakah karena beban kerja yang "
+                                 f"timpang atau memang jam kerja berbeda."))
+
+                _tanpa = jasa.loc[jasa['TEKNISI'] == 'TIDAK ADA TEKNISI', 'TOTAL HARGA'].sum()
+                if _tanpa > omzet_j * 0.03:
+                    _ant.append(('aksi', 'Omzet jasa tanpa nama teknisi',
+                                 f"{rp(_tanpa)} ({_tanpa/omzet_j*100:.1f}% omzet jasa) tidak "
+                                 f"tercatat teknisinya, sehingga bagi hasilnya tidak bisa "
+                                 f"dialokasikan. <b>Tindakan:</b> wajibkan pengisian kolom "
+                                 f"teknisi saat pembuatan faktur."))
+                if not _ant:
+                    _ant.append(('info', 'Belum ada temuan menonjol', "Angka relatif stabil."))
+                panel_analisa(_ant)
+
                 with st.expander("ℹ️ Cara perhitungan & catatan"):
                     st.write(
                         "**Tarif bagi hasil** ditentukan dari kata kunci pada kolom NAMA BARANG. "
@@ -1836,6 +2398,74 @@ with tab_bundling:
             data=gc.reset_index().to_csv(index=False).encode('utf-8-sig'),
             file_name="bundling_aksesoris_per_cabang.csv", mime="text/csv",
             key='bund_unduh')
+
+        # ---------- perbandingan periode ----------
+        st.markdown("### 📊 Perbandingan Periode")
+        _nota_p = nota.rename(columns={'Tgl': 'TGL'})
+        _potb = potong_periode(_nota_p, 'TGL')
+        render_banding(_potb, [
+            ("Total nota", lambda x: len(x), lambda v: f"{v:,.0f}", True),
+            ("Nota bundling", lambda x: int(x['Bundling'].sum()),
+             lambda v: f"{v:,.0f}", True),
+            ("Attach rate", lambda x: x['Bundling'].mean() * 100 if len(x) else 0,
+             lambda v: f"{v:.1f}%".replace('.', ','), True),
+            ("Nilai aksesoris", lambda x: x['Nilai Aksesoris'].sum(),
+             lambda v: rp(v), True),
+            ("Belum bundling",
+             lambda x: int(((~x['Ada Aksesoris']) & x['Ada Lainnya']).sum()),
+             lambda v: f"{v:,.0f}", False),
+        ], key_prefix='bund')
+
+        st.markdown("### 🧭 Analisa & Tindak Lanjut")
+        _anb = []
+        if _potb and not _potb['bulan_ini'].empty and not _potb['bulan_lalu'].empty:
+            r_i = _potb['bulan_ini']['Bundling'].mean() * 100
+            r_l = _potb['bulan_lalu']['Bundling'].mean() * 100
+            d = r_i - r_l
+            if d < -1:
+                _anb.append(('aksi', f'Attach rate turun {abs(d):.1f} poin',
+                             f"Dari {r_l:.1f}% ke {r_i:.1f}%. <b>Tindakan:</b> ingatkan "
+                             f"kembali kebiasaan menawarkan aksesoris saat serah terima "
+                             f"unit; cek juga apakah stok aksesoris sedang kosong."))
+            elif d > 1:
+                _anb.append(('baik', f'Attach rate naik {d:.1f} poin',
+                             f"Dari {r_l:.1f}% ke {r_i:.1f}%. <b>Tindakan:</b> catat apa "
+                             f"yang berubah bulan ini dan bakukan ke seluruh cabang."))
+
+        if len(peluang):
+            _pc2 = peluang['CABANG'].value_counts()
+            _potensi = bund['Nilai Aksesoris'].mean() if n_bund else 0
+            _anb.append(('aksi', f'{len(peluang):,} nota belum ditawari aksesoris',
+                         f"Terbanyak di <b>{_pc2.index[0]}</b> ({_pc2.iloc[0]:,} nota). "
+                         f"Bila separuhnya berhasil dilekati aksesoris dengan nilai "
+                         f"rata-rata {rp(_potensi)}, potensi tambahan omzet sekitar "
+                         f"<b>{rp(len(peluang) * 0.5 * _potensi)}</b>. <b>Tindakan:</b> "
+                         f"jadikan penawaran aksesoris bagian wajib dari alur serah terima."))
+
+        if len(gc) >= 3:
+            _ter = gc.head(1)
+            _bwh2 = gc.tail(2)
+            _anb.append(('perhatian', 'Jarak antar cabang lebar',
+                         f"<b>{_ter.index[0]}</b> mencapai {_ter['Attach Rate %'].iloc[0]:.1f}%, "
+                         f"sementara {' dan '.join(f'{i} ({r:.1f}%)' for i, r in zip(_bwh2.index, _bwh2['Attach Rate %']))}"
+                         f". Selisihnya "
+                         f"{_ter['Attach Rate %'].iloc[0] - _bwh2['Attach Rate %'].iloc[-1]:.1f} poin. "
+                         f"<b>Tindakan:</b> kirim tim {_ter.index[0]} untuk berbagi cara "
+                         f"menawarkan, karena selisih sebesar ini biasanya soal kebiasaan "
+                         f"kerja, bukan daya beli pelanggan."))
+
+        if len(gp):
+            _low_p = gp.tail(3)
+            _anb.append(('info', 'Penjual dengan attach rate terendah',
+                         f"{', '.join(f'{i} ({r:.1f}%)' for i, r in zip(_low_p.index, _low_p['Attach Rate %']))} "
+                         f"— dibanding tertinggi {gp['Attach Rate %'].iloc[0]:.1f}%. "
+                         f"<b>Tindakan:</b> jadikan bahan pembinaan, bukan penalti."))
+
+        _anb.append(('info', 'Sebagian besar bundling terjadi pada servis',
+                     "Pasangan aksesoris terbanyak adalah <b>jasa</b> dan <b>sparepart</b>, "
+                     "artinya peluang terbesar ada saat pelanggan mengambil unit yang "
+                     "selesai diperbaiki — bukan saat pembelian unit baru."))
+        panel_analisa(_anb)
 
         with st.expander("ℹ️ Cara perhitungan & catatan"):
             st.write(

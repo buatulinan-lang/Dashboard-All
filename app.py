@@ -932,19 +932,20 @@ def render_detail_dashboard(filtered_df, total_unique_all, *, status_bucket, jen
     panel_analisa(_an)
 
     _wrn = {'DONE': _PG, 'CANCEL': _PR, 'PENDING': _PA}.get(_sb, _PN)
+    _porsi = (total_s / len(filtered_df) * 100) if len(filtered_df) else 0
     _kp = [{'label': f'Jumlah {rank_label}', 'value': nfid(total_s),
-            'sub': f"{pctid(porsi)} dari total", 'warna': _wrn}]
+            'sub': f"{pctid(_porsi)} dari total", 'warna': _wrn}]
     if total_s:
-        _kp += [{'label': 'Teknisi Terbanyak',
-                 'value': (str(tek.index[0])[:20] if len(tek) else '-'),
-                 'sub': (f"{nfid(tek.iloc[0])} unit" if len(tek) else '-'), 'warna': _PN},
-                {'label': 'Cabang Terbanyak', 'value': str(cab.index[0])[:16],
-                 'sub': f"{nfid(cab.iloc[0])} unit", 'warna': _PN},
-                {'label': 'Kerusakan Terbanyak', 'value': str(ker.index[0])[:18],
-                 'sub': f"{nfid(ker.iloc[0])} unit", 'warna': _PR}]
+        _kp += [{'label': 'Teknisi Terbanyak', 'value': str(top_tek_name)[:20],
+                 'sub': (f"{nfid(top_tek_count)} unit" if top_tek_count else '-'),
+                 'warna': _PN},
+                {'label': 'Cabang Terbanyak', 'value': str(top_cabang_name)[:16],
+                 'sub': f"{nfid(top_cabang_count)} unit", 'warna': _PN},
+                {'label': 'Kerusakan Terbanyak', 'value': str(top_ker_name)[:18],
+                 'sub': f"{nfid(top_ker_count)} unit", 'warna': _PR}]
     tombol_pdf(f"Dashboard {rank_label}", _pot, _metrik_d, _an, kpis=_kp,
                ringkasan=(f"{nfid(total_s)} transaksi berstatus {rank_label.lower()} "
-                          f"({pctid(porsi)} dari seluruh transaksi pada filter ini)."),
+                          f"({pctid(_porsi)} dari seluruh transaksi pada filter ini)."),
                metodologi=note_text, key=key_prefix)
 
     with st.expander("ℹ️ Catatan metodologi"):

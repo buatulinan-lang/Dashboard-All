@@ -702,6 +702,126 @@ def kpi_html(cards) -> str:
     return f'<div class="kpi-wrap">{"".join(cells)}</div>'
 
 
+KELOMPOK_UMUR = [
+    (0, 7, "0–7 hari", "#16a34a"),
+    (8, 14, "8–14 hari", "#65b83f"),
+    (15, 30, "15–30 hari", "#e0b31f"),
+    (31, 60, "31–60 hari", "#e0921f"),
+    (61, 90, "61–90 hari", "#e0651f"),
+    (91, 10 ** 6, "> 90 hari", "#c0392b"),
+]
+
+
+def kelompok_umur(hari):
+    for a, b, label, _ in KELOMPOK_UMUR:
+        if a <= hari <= b:
+            return label
+    return KELOMPOK_UMUR[-1][2]
+
+
+def render_umur_pending(sub, semua_df, key_prefix):
+    """Tampilkan sebaran umur unit yang tertahan.
+
+    Umur dihitung dari TGL PENGIRIMAN sampai tanggal data terakhir (bukan
+    tanggal hari ini), supaya angkanya tidak ikut membengkak bila dashboard
+    dibuka lama setelah data terakhir ditarik.
+    """
+    if 'TGL PENGIRIMAN' not in sub.columns:
+        return None
+    s = sub.dropna(subset=['TGL PENGIRIMAN']).copy()
+    if s.empty:
+        return None
+
+    acuan = semua_df['TGL PENGIRIMAN'].max()
+    if pd.isna(acuan):
+        return None
+    s['UMUR'] = (acuan - s['TGL PENGIRIMAN']).dt.days.clip(lower=0)
+    s['KEL_UMUR'] = s['UMUR'].map(kelompok_umur)
+
+    n = len(s)
+    med = s['UMUR'].median()
+    n30 = int((s['UMUR'] > 30).sum())
+    n90 = int((s['UMUR'] > 90).sum())
+    tertua = s.loc[s['UMUR'].idxmax()]
+
+    st.markdown("#### ⏳ Umur Pendingan")
+    st.caption(
+        f"Dihitung dari tanggal masuk sampai tanggal data terakhir "
+        f"(**{acuan:%d %B %Y}**). Jumlah pending saja belum cukup — yang "
+        f"menentukan risiko komplain adalah berapa lama unit tertahan."
+    )
+    st.markdown(kpi_html([
+        {'label': 'Median Umur', 'value': f"{nfid(med)} hari",
+         'sub': f"separuh pendingan di bawah ini",
+         'grad': 'linear-gradient(135deg,#1f3864,#2e5394)'},
+        {'label': 'Lebih dari 30 Hari', 'value': nfid(n30),
+         'sub': f"{pctid(n30/n*100 if n else 0)} dari pendingan",
+         'grad': 'linear-gradient(135deg,#e0921f,#e2b21a)'},
+        {'label': 'Lebih dari 90 Hari', 'value': nfid(n90),
+         'sub': f"{pctid(n90/n*100 if n else 0)} — sudah kritis",
+         'grad': 'linear-gradient(135deg,#c0392b,#e0475a)'},
+        {'label': 'Unit Tertua', 'value': f"{nfid(tertua['UMUR'])} hari",
+         'sub': f"{tertua['CABANG']} · {tertua['TGL PENGIRIMAN']:%d/%m/%Y}",
+         'grad': 'linear-gradient(135deg,#7c3aed,#a855f7)'},
+        {'label': 'Rata-rata Umur', 'value': f"{nfid(s['UMUR'].mean())} hari",
+         'sub': "lebih tinggi dari median = ada ekor panjang",
+         'grad': 'linear-gradient(135deg,#0f8a82,#17a3a3)'},
+    ]), unsafe_allow_html=True)
+    st.write("")
+
+    u1, u2 = st.columns([1, 1.15])
+    with u1:
+        st.markdown("###### Sebaran Kelompok Umur")
+        urut = [k[2] for k in KELOMPOK_UMUR]
+        warna = {k[2]: k[3] for k in KELOMPOK_UMUR}
+        vc = s['KEL_UMUR'].value_counts().reindex(urut, fill_value=0)
+        figu = go.Figure(go.Bar(
+            x=vc.index, y=vc.values,
+            marker_color=[warna[i] for i in vc.index],
+            text=[f"{v}" for v in vc.values], textposition='outside'))
+        figu.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10),
+                           yaxis_title='Jumlah unit')
+        st.plotly_chart(figu, use_container_width=True, key=f'{key_prefix}_umur_bar')
+    with u2:
+        st.markdown("###### Umur Pendingan per Cabang")
+        tab = pd.crosstab(s['CABANG'], s['KEL_UMUR'])
+        for k in urut:
+            if k not in tab.columns:
+                tab[k] = 0
+        tab = tab[urut]
+        tab['Total'] = tab.sum(axis=1)
+        tab['> 30 hari'] = s[s['UMUR'] > 30].groupby('CABANG').size().reindex(
+            tab.index, fill_value=0)
+        tab['% > 30 hari'] = (tab['> 30 hari'] / tab['Total'] * 100).round(1)
+        tab = tab.sort_values('> 30 hari', ascending=False)
+        st.dataframe(tab, use_container_width=True, height=320,
+                     key=f'{key_prefix}_umur_cab')
+
+    st.markdown("###### 20 Unit Paling Lama Tertahan")
+    kol = ['TGL PENGIRIMAN', 'UMUR', 'CABANG', 'TEKNISI', 'KERUSAKAN',
+           'STATUS PENGERJAAN', 'NAMA CUSTOMER']
+    kol = [c for c in kol if c in s.columns]
+    lama = s.nlargest(20, 'UMUR')[kol].rename(columns={
+        'TGL PENGIRIMAN': 'Tgl Masuk', 'UMUR': 'Umur (hari)', 'CABANG': 'Cabang',
+        'TEKNISI': 'Teknisi', 'KERUSAKAN': 'Kerusakan',
+        'STATUS PENGERJAAN': 'Status', 'NAMA CUSTOMER': 'Customer'})
+    st.dataframe(lama, use_container_width=True, height=340, hide_index=True,
+                 key=f'{key_prefix}_umur_lama')
+
+    csv_umur = s[kol + ['KEL_UMUR']].sort_values('UMUR', ascending=False)
+    st.download_button(
+        "⬇️ Unduh daftar pendingan beserta umurnya (CSV)",
+        data=csv_umur.to_csv(index=False).encode('utf-8-sig'),
+        file_name="pendingan_dengan_umur.csv", mime="text/csv",
+        key=f'{key_prefix}_umur_unduh')
+
+    return {'n': n, 'median': med, 'rata': s['UMUR'].mean(), 'n30': n30,
+            'n90': n90, 'tertua': tertua, 'acuan': acuan,
+            'per_cabang': s[s['UMUR'] > 30]['CABANG'].value_counts(),
+            'per_kerusakan': s[s['UMUR'] > 30]['KERUSAKAN'].value_counts()
+            if 'KERUSAKAN' in s.columns else pd.Series(dtype=int)}
+
+
 def render_detail_dashboard(filtered_df, total_unique_all, *, status_bucket, jenis_func,
                              jenis_col_label, palette, banner_html, card_grads, rank_label,
                              note_text, key_prefix):
@@ -763,6 +883,14 @@ def render_detail_dashboard(filtered_df, total_unique_all, *, status_bucket, jen
         with st.expander("ℹ️ Catatan metodologi"):
             st.write(note_text)
         return
+
+    # ---------- umur pendingan ----------
+    # Jumlah pending saja belum cukup: unit yang tertahan 3 hari itu operasi
+    # normal, sedangkan yang tertahan 200 hari sudah jadi aset mati sekaligus
+    # komplain yang tinggal menunggu waktu.
+    umur_info = None
+    if status_bucket == 'PENDING':
+        umur_info = render_umur_pending(sub, filtered_df, key_prefix)
 
     col1, col2 = st.columns(2)
     with col1:
@@ -887,6 +1015,33 @@ def render_detail_dashboard(filtered_df, total_unique_all, *, status_bucket, jen
         tek_r = sub[~sub['TEKNISI'].isin(['TIDAK ADA TEKNISI', 'N/A'])]['TEKNISI'].value_counts()
         cab_r = sub['CABANG'].value_counts()
         ker_r = sub['KERUSAKAN'].value_counts()
+        if _sb == 'PENDING' and umur_info:
+            ui = umur_info
+            if ui['n30']:
+                cab30 = ui['per_cabang']
+                ker30 = ui['per_kerusakan']
+                _an.append((
+                    'aksi', f"{nfid(ui['n30'])} unit tertahan lebih dari 30 hari",
+                    f"Itu {pctid(ui['n30']/ui['n']*100)} dari seluruh pendingan, dan "
+                    f"{nfid(ui['n90'])} di antaranya sudah lewat 90 hari. "
+                    + (f"Terbanyak di <b>{cab30.index[0]}</b> ({nfid(cab30.iloc[0])} unit)"
+                       if len(cab30) else "")
+                    + (f", kerusakan <b>{ker30.index[0]}</b>" if len(ker30) else "")
+                    + ". <b>Tindakan:</b> unit setua ini biasanya menunggu keputusan "
+                      "pelanggan atau sparepart yang tak kunjung ada — hubungi "
+                      "pelanggannya untuk keputusan lanjut/ambil, jangan dibiarkan "
+                      "menumpuk di rak."))
+            if ui['rata'] > ui['median'] * 2:
+                _an.append((
+                    'perhatian', 'Sebagian kecil unit menyeret rata-rata jauh ke atas',
+                    f"Median umur {nfid(ui['median'])} hari tapi rata-ratanya "
+                    f"{nfid(ui['rata'])} hari — artinya mayoritas pendingan sebenarnya "
+                    f"masih wajar, hanya ada segelintir unit sangat tua "
+                    f"(tertua {nfid(ui['tertua']['UMUR'])} hari di "
+                    f"{ui['tertua']['CABANG']}). <b>Tindakan:</b> selesaikan ekor "
+                    f"panjang ini lebih dulu; jumlahnya sedikit tapi dampaknya pada "
+                    f"citra layanan paling besar."))
+
         if _sb == 'PENDING':
             dua = cab_r.head(2)
             porsi = dua.sum() / total_s * 100
@@ -943,6 +1098,14 @@ def render_detail_dashboard(filtered_df, total_unique_all, *, status_bucket, jen
                  'sub': f"{nfid(top_cabang_count)} unit", 'warna': _PN},
                 {'label': 'Kerusakan Terbanyak', 'value': str(top_ker_name)[:18],
                  'sub': f"{nfid(top_ker_count)} unit", 'warna': _PR}]
+    if umur_info:
+        _kp += [{'label': 'Median Umur', 'value': f"{nfid(umur_info['median'])} hari",
+                 'sub': 'separuh pendingan di bawah ini', 'warna': _PN},
+                {'label': 'Tertahan > 30 Hari', 'value': nfid(umur_info['n30']),
+                 'sub': f"{pctid(umur_info['n30']/umur_info['n']*100)} dari pendingan",
+                 'warna': _PA},
+                {'label': 'Tertahan > 90 Hari', 'value': nfid(umur_info['n90']),
+                 'sub': 'sudah kritis', 'warna': _PR}]
     tombol_pdf(f"Dashboard {rank_label}", _pot, _metrik_d, _an, kpis=_kp,
                ringkasan=(f"{nfid(total_s)} transaksi berstatus {rank_label.lower()} "
                           f"({pctid(_porsi)} dari seluruh transaksi pada filter ini)."),

@@ -4284,3 +4284,227 @@ with tab_reward:
                 "hampir tidak punya HARGA BELI, sehingga marginnya tampak tinggi. "
                 "Angka ini belum dipotong bagi hasil teknisi dan biaya cabang."
             )
+
+        # =====================================================================
+        # PROGRAM PENJUALAN AKSESORIS — TARGET PER CABANG (3 BULANAN)
+        # =====================================================================
+        st.markdown("---")
+        st.markdown("## 🎯 Program Penjualan Aksesoris")
+        st.caption(
+            "Target penjualan aksesoris dibagi ke tiap cabang menurut porsi "
+            "budget bundlingnya, lalu dibandingkan dengan pencapaian nyata."
+        )
+
+        # Program berjalan 3 bulanan mulai Juli — persis sama dengan kuartal
+        # kalender (Jul–Sep, Okt–Des, Jan–Mar, Apr–Jun), karena Juli memang
+        # awal kuartal ketiga.
+        tgl_acuan = pd.Timestamp(sales['TGL'].max()).normalize()
+        _bulan_mulai = ((tgl_acuan.month - 1) // 3) * 3 + 1
+        _mulai_kini = pd.Timestamp(tgl_acuan.year, _bulan_mulai, 1)
+
+        def _batas_program(awal):
+            akhir_bulan = awal.month + 2
+            th = awal.year + (1 if akhir_bulan > 12 else 0)
+            akhir_bulan = akhir_bulan - 12 if akhir_bulan > 12 else akhir_bulan
+            return pd.Timestamp(th, akhir_bulan,
+                                calendar.monthrange(th, akhir_bulan)[1])
+
+        _pilihan_program, _p = [], pd.Timestamp(2026, 7, 1)
+        while _p <= _mulai_kini:
+            _pilihan_program.append(_p)
+            _p = _p + pd.DateOffset(months=3)
+        if not _pilihan_program:
+            _pilihan_program = [_mulai_kini]
+
+        pc1, pc2 = st.columns([1.4, 1])
+        with pc1:
+            mulai = st.selectbox(
+                "Periode program", _pilihan_program,
+                index=len(_pilihan_program) - 1,
+                format_func=lambda d: (f"{BULAN_NAMES[d.month]} – "
+                                       f"{BULAN_NAMES[_batas_program(d).month]} "
+                                       f"{_batas_program(d).year}"),
+                key='pg_periode')
+        with pc2:
+            target_total = float(st.number_input(
+                "Target penjualan seluruh cabang (Rp)", min_value=0.0,
+                max_value=1_000_000_000_000.0, value=2_000_000_000.0,
+                step=100_000_000.0, format="%.0f", key='pg_target',
+                help="Dibagi ke tiap cabang menurut porsi budget bundlingnya."))
+
+        akhir = _batas_program(mulai)
+        hari_program = (akhir - mulai).days + 1
+        hari_jalan = int(min(max((tgl_acuan - mulai).days + 1, 0), hari_program))
+        sisa_hari = hari_program - hari_jalan
+        porsi_waktu = (hari_jalan / hari_program) if hari_program else 0.0
+
+        # ---- bobot cabang dari budget bundling -----------------------------
+        # Sengaja memakai SELURUH data, bukan hanya periode program, supaya
+        # target tiap cabang tidak berubah-ubah setiap hari selama program
+        # berjalan. Target yang bergerak mustahil dikejar.
+        _nn_all = sales.groupby(['CABANG', 'NO FAKTUR'])['TOTAL HARGA'].sum()
+        _bb = hitung_tier_nota(_nn_all, tingkat)
+        # Dikelompokkan lewat level indeks, bukan kolom bernama sama, supaya
+        # pandas tidak bingung antara nama indeks dan nama kolom.
+        bobot = _bb.groupby(level='CABANG')['REWARD'].sum()
+        total_bb = float(bobot.sum())
+
+        if total_bb <= 0:
+            st.warning("Budget bundling seluruh cabang bernilai nol — "
+                       "target belum bisa dibagi.")
+        else:
+            # ---- pencapaian: omzet kategori AKSESORIS selama program -------
+            aks = sales[(sales['KATEGORI'].isin(['AKSESORIS', 'ACCESORIES']))
+                        & (sales['TGL'] >= mulai) & (sales['TGL'] <= akhir)]
+            capai = aks.groupby('CABANG')['TOTAL HARGA'].sum()
+
+            pg = pd.DataFrame({'Budget Bundling': bobot})
+            pg['% Penjualan'] = pg['Budget Bundling'] / total_bb * 100
+            pg['Target Penjualan'] = pg['% Penjualan'] / 100 * target_total
+            pg['Pencapaian'] = capai.reindex(pg.index).fillna(0.0)
+            pg['Target s/d Hari Ini'] = pg['Target Penjualan'] * porsi_waktu
+            pg['% Pencapaian'] = pg.apply(
+                lambda r: (r['Pencapaian'] / r['Target s/d Hari Ini'] * 100)
+                if r['Target s/d Hari Ini'] > 0 else 0.0, axis=1)
+            pg['Sisa Target'] = (pg['Target Penjualan'] - pg['Pencapaian']).clip(lower=0)
+            pg['Sisa Hari'] = sisa_hari
+            pg['Butuh / Hari'] = (pg['Sisa Target'] / sisa_hari) if sisa_hari else 0.0
+            pg = pg.sort_values('Target Penjualan', ascending=False)
+
+            capai_total = float(pg['Pencapaian'].sum())
+            target_kini = target_total * porsi_waktu
+            pct_total = (capai_total / target_kini * 100) if target_kini else 0.0
+            sisa_total = max(target_total - capai_total, 0.0)
+
+            warna_p = ('linear-gradient(135deg,#16a34a,#22c55e)' if pct_total >= 100
+                       else ('linear-gradient(135deg,#f59e0b,#fbbf24)'
+                             if pct_total >= 80
+                             else 'linear-gradient(135deg,#dc2626,#ef4444)'))
+            st.markdown(kpi_html([
+                {'label': 'Target Program', 'value': rp(target_total),
+                 'sub': (f"{BULAN_NAMES[mulai.month]}–"
+                         f"{BULAN_NAMES[akhir.month]} {akhir.year}"),
+                 'grad': 'linear-gradient(135deg,#3b5bfd,#5a72ff)'},
+                {'label': 'Target s/d Hari Ini', 'value': rp(target_kini),
+                 'sub': f"{nfid(hari_jalan)} dari {nfid(hari_program)} hari "
+                        f"({pctid(porsi_waktu * 100)})",
+                 'grad': 'linear-gradient(135deg,#7c3aed,#a855f7)'},
+                {'label': 'Pencapaian Aksesoris', 'value': rp(capai_total),
+                 'sub': f"s/d {tgl_acuan.strftime('%d %b %Y')}",
+                 'grad': 'linear-gradient(135deg,#0f8a82,#17a3a3)'},
+                {'label': '% Pencapaian', 'value': pctid(pct_total),
+                 'sub': 'terhadap target s/d hari ini', 'grad': warna_p},
+                {'label': 'Sisa Target', 'value': rp(sisa_total),
+                 'sub': f"{pctid(sisa_total / target_total * 100 if target_total else 0)} dari target",
+                 'grad': 'linear-gradient(135deg,#dc2626,#ef4444)'},
+                {'label': 'Sisa Hari', 'value': nfid(sisa_hari),
+                 'sub': (f"butuh {rp(sisa_total / sisa_hari)}/hari" if sisa_hari
+                         else 'program sudah berakhir'),
+                 'grad': 'linear-gradient(135deg,#64748b,#94a3b8)'},
+            ]), unsafe_allow_html=True)
+            st.write("")
+
+            figpg = go.Figure()
+            figpg.add_bar(x=pg.index, y=pg['Target s/d Hari Ini'],
+                          name='Target s/d hari ini', marker_color='#94a3b8',
+                          hovertemplate='%{x}<br>Target: Rp %{y:,.0f}<extra></extra>')
+            figpg.add_bar(x=pg.index, y=pg['Pencapaian'], name='Pencapaian',
+                          marker_color=['#16a34a' if v >= 100 else
+                                        ('#e0b31f' if v >= 80 else '#c0392b')
+                                        for v in pg['% Pencapaian']],
+                          text=[pctid(v) for v in pg['% Pencapaian']],
+                          textposition='outside',
+                          hovertemplate='%{x}<br>Pencapaian: Rp %{y:,.0f}<extra></extra>')
+            figpg.update_layout(
+                barmode='group', height=440,
+                margin=dict(l=10, r=10, t=40, b=10),
+                yaxis=dict(title='Rupiah'),
+                legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0),
+                plot_bgcolor='#ffffff')
+            figpg.update_xaxes(tickangle=-35)
+            st.plotly_chart(figpg, use_container_width=True, key='pg_grafik')
+            st.caption(
+                "Batang abu-abu adalah target yang seharusnya sudah tercapai "
+                "sampai hari ini (target penuh dibagi rata per hari). Batang "
+                "berwarna adalah pencapaian nyata — hijau bila sudah memenuhi, "
+                "kuning bila 80–100%, merah bila di bawah 80%.")
+
+            st.dataframe(
+                pg[['Budget Bundling', '% Penjualan', 'Target Penjualan',
+                    'Pencapaian', 'Target s/d Hari Ini', '% Pencapaian',
+                    'Sisa Target', 'Sisa Hari', 'Butuh / Hari']].style.format({
+                    'Budget Bundling': 'Rp {:,.0f}', '% Penjualan': '{:.2f}%',
+                    'Target Penjualan': 'Rp {:,.0f}', 'Pencapaian': 'Rp {:,.0f}',
+                    'Target s/d Hari Ini': 'Rp {:,.0f}', '% Pencapaian': '{:.1f}%',
+                    'Sisa Target': 'Rp {:,.0f}', 'Sisa Hari': '{:,.0f}',
+                    'Butuh / Hari': 'Rp {:,.0f}'}),
+                use_container_width=True, height=420, key='pg_tabel')
+
+            st.download_button(
+                "⬇️ Unduh target & pencapaian per cabang (CSV)",
+                data=pg.reset_index().to_csv(index=False).encode('utf-8-sig'),
+                file_name=(f"program_aksesoris_{mulai.strftime('%Y%m')}_"
+                           f"{akhir.strftime('%Y%m')}.csv"),
+                mime="text/csv", key='pg_unduh')
+
+            # ---- analisa ---------------------------------------------------
+            _pi = []
+            _lolos = pg[pg['% Pencapaian'] >= 100]
+            _tertinggal = pg[pg['% Pencapaian'] < 80].sort_values('% Pencapaian')
+
+            _pi.append((
+                'baik' if pct_total >= 100 else
+                ('perhatian' if pct_total >= 80 else 'aksi'),
+                "Posisi program secara keseluruhan",
+                f"Sampai hari ke-<b>{nfid(hari_jalan)}</b> dari "
+                f"{nfid(hari_program)} hari, pencapaian aksesoris "
+                f"<b>{rp(capai_total)}</b> terhadap target berjalan "
+                f"<b>{rp(target_kini)}</b> — setara <b>{pctid(pct_total)}</b>. "
+                + (f"Sisa <b>{rp(sisa_total)}</b> dalam <b>{nfid(sisa_hari)} hari</b>, "
+                   f"artinya perlu <b>{rp(sisa_total / sisa_hari)} per hari</b> "
+                   f"seluruh cabang. Sebagai pembanding, sampai sekarang "
+                   f"rata-ratanya <b>{rp(capai_total / hari_jalan if hari_jalan else 0)} per hari</b>."
+                   if sisa_hari else "Program pada periode ini sudah berakhir.")))
+
+            if len(_tertinggal):
+                _nama = ", ".join(f"{i} ({pctid(float(v))})" for i, v
+                                  in _tertinggal['% Pencapaian'].head(5).items())
+                _pi.append((
+                    'aksi', f"{nfid(len(_tertinggal))} cabang di bawah 80%",
+                    f"Paling tertinggal: <b>{_nama}</b>. Gabungan kekurangan "
+                    f"mereka <b>{rp(float((_tertinggal['Target s/d Hari Ini'] - _tertinggal['Pencapaian']).sum()))}</b> "
+                    f"dari target berjalan. Karena targetnya dibagi menurut porsi "
+                    f"budget bundling, cabang bervolume besar otomatis memikul "
+                    f"target besar pula — jadi ketertinggalan di cabang besar "
+                    f"berdampak jauh lebih berat pada angka keseluruhan daripada "
+                    f"di cabang kecil."))
+
+            if len(_lolos):
+                _pi.append((
+                    'baik', f"{nfid(len(_lolos))} cabang sudah memenuhi target berjalan",
+                    f"Tertinggi: <b>{_lolos['% Pencapaian'].idxmax()}</b> "
+                    f"({pctid(float(_lolos['% Pencapaian'].max()))}). Cara kerja "
+                    f"cabang-cabang ini layak ditanyakan dan ditiru — target "
+                    f"mereka dihitung dengan rumus yang sama, jadi selisihnya "
+                    f"bukan karena targetnya lebih ringan."))
+
+            _pi.append((
+                'info', "Cara angka ini dihitung",
+                f"<b>% Penjualan</b> = budget bundling cabang ÷ budget bundling "
+                f"seluruh cabang. <b>Target Penjualan</b> = % penjualan × "
+                f"{rp(target_total)}. <b>Pencapaian</b> = omzet barang berkategori "
+                f"AKSESORIS selama {mulai.strftime('%d %b')}–"
+                f"{akhir.strftime('%d %b %Y')}. <b>Target s/d hari ini</b> = "
+                f"target penuh × (hari berjalan ÷ hari program) = "
+                f"{nfid(hari_jalan)} ÷ {nfid(hari_program)} = "
+                f"{pctid(porsi_waktu * 100)}. <b>Sisa hari</b> = "
+                f"{nfid(hari_program)} − {nfid(hari_jalan)} = {nfid(sisa_hari)}.<br><br>"
+                f"Bobot cabang sengaja dihitung dari <b>seluruh data</b>, bukan "
+                f"hanya periode program. Kalau dihitung dari periode berjalan, "
+                f"target tiap cabang ikut bergerak setiap hari dan mustahil "
+                f"dikejar. Tanggal acuan memakai tanggal faktur terakhir pada "
+                f"data (<b>{tgl_acuan.strftime('%d %B %Y')}</b>), bukan tanggal "
+                f"hari ini, supaya persentasenya tidak terlihat rendah hanya "
+                f"karena datanya belum diperbarui."))
+
+            panel_analisa(_pi)

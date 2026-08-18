@@ -224,6 +224,71 @@ File gambar ada di folder `assets/`:
 Timpa file-file itu dengan gambar lain kalau template perusahaan berubah;
 tidak perlu mengubah kode.
 
+## Mengatur rentang harga & reward nota (tab 🏆 Reward Nota Pelanggan)
+
+Ketentuan reward tidak ditanam di dalam kode — Anda bisa mengubahnya sendiri
+dari dashboard, termasuk **rentang harganya**, bukan hanya nilai rewardnya.
+
+Buka tab **🏆 Reward Nota Pelanggan**, lalu klik
+**⚙️ Atur rentang harga & reward**.
+
+### Cara mengisi tabel aturan
+
+Tabelnya hanya punya dua kolom:
+
+| Kolom | Arti |
+|---|---|
+| **Batas Bawah (Rp)** | Nota mulai dari nilai ini (termasuk) masuk tingkat tersebut |
+| **Reward (Rp)** | Hadiah untuk satu nota di tingkat itu |
+
+Batas atas **tidak perlu diisi** — terbentuk sendiri dari batas bawah tingkat
+berikutnya. Dengan begitu tidak mungkin ada celah atau rentang yang tumpang
+tindih. Baris paling bawah otomatis menjadi tingkat tertinggi tanpa batas atas.
+
+Contoh: kalau baris berisi `0`, `200.000`, dan `400.000`, artinya terbentuk
+tiga tingkat: 0–200 rb, 200 rb–400 rb, dan 400 rb ke atas.
+
+- **Menambah tingkat** — tekan tanda **+** di baris kosong paling bawah tabel
+- **Menghapus tingkat** — centang barisnya, lalu tekan ikon tempat sampah
+- **Mengubah** — klik selnya dan ketik angka baru
+
+Setiap perubahan langsung mengubah seluruh grafik, tabel, analisa, dan PDF.
+
+### Aturan batas yang dipakai
+
+Batas bawah **termasuk**, batas atas **tidak termasuk**. Nota senilai tepat
+Rp 200.000 masuk tingkat **200 rb–400 rb** (reward Rp 50 rb), bukan tingkat di
+bawahnya.
+
+Ini bukan detail sepele. Pada data Januari–Agustus 2026 ada 2.805 nota tepat
+Rp 200.000 dan 3.702 nota tepat Rp 400.000 — cukup untuk menggeser total biaya
+reward sekitar Rp 190 juta. Dashboard menampilkan sendiri berapa nota yang
+nilainya persis di angka batas pada bagian analisa.
+
+### Menyimpan aturan agar tidak hilang
+
+Aplikasi di Streamlit Cloud akan tidur bila lama tidak dipakai, dan
+pengaturannya kembali ke bawaan. Supaya tidak perlu mengetik ulang:
+
+1. Setelah aturan selesai diatur, tekan **💾 Simpan aturan ini (.json)**
+2. Simpan berkasnya di komputer Anda
+3. Lain kali, muat kembali lewat **Muat aturan yang pernah disimpan (.json)**
+
+Tombol **↩️ Kembalikan ke ketentuan awal** mengembalikan delapan tingkat
+bawaan kapan saja.
+
+### Kalau tabel diisi keliru
+
+Aplikasi memperbaiki sendiri kesalahan yang lazim dan memberi tahu apa yang
+diperbaiki:
+
+- Baris tidak urut → diurutkan otomatis dari kecil ke besar
+- Batas bawah kembar → yang dipakai baris terakhir
+- Batas terkecil bukan 0 → diubah menjadi 0 supaya tidak ada nota yang lolos
+  dari penggolongan
+- Baris kosong → diabaikan
+- Kurang dari 2 tingkat → ditolak, ketentuan bawaan dipakai sementara
+
 ## Menghentikan aplikasi
 
 Kembali ke Terminal/Command Prompt tempat `streamlit run app.py` dijalankan,

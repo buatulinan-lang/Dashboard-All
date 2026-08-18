@@ -172,6 +172,20 @@ def _read_csv_gz_raw(file_bytes: bytes) -> pd.DataFrame:
     return pd.read_csv(io.BytesIO(file_bytes), compression='gzip')
 
 
+# Kolom yang tidak pernah ditampilkan atau dihitung dashboard. Dibuang saat
+# pemuatan supaya jejak memori jauh lebih kecil — penting karena Streamlit
+# Cloud membatasi memori dan aplikasi mati tanpa penjelasan bila terlampaui.
+SERVIS_TAK_DIPAKAI = [
+    'TANGGAL STATUS PENGERJAAN', 'KATEGORI PENJUALAN', 'KATEGORI PENGERJAAN UNIT',
+    'NAMA ADMIN', 'ID CUSTOMER', 'KECAMATAN', 'STATUS NO NOTA',
+    'ESTIMASI HARGA SERVICE', 'ESTIMASI GADGET SELESAI',
+]
+JUAL_TAK_DIPAKAI = [
+    'Tanggal Pengiriman Pesanan', 'KATEGORI PELANGGAN', 'NAMA ADMIN',
+    'KODE BARANG', 'Nama Default Penjual Pelanggan Faktur Penjualan',
+]
+
+
 @st.cache_data(show_spinner="Membaca & memproses data (bisa beberapa puluh detik untuk file besar)...")
 def load_data(file_bytes: bytes, source_kind: str) -> pd.DataFrame:
     if source_kind == 'csv_gz':
@@ -194,6 +208,13 @@ def load_data(file_bytes: bytes, source_kind: str) -> pd.DataFrame:
     total_raw = len(full)
     full = full.drop_duplicates(subset=original_cols + ['CABANG'], keep='first').reset_index(drop=True)
     total_unique = len(full)
+
+    # Kolom yang tidak dipakai dashboard mana pun dibuang SETELAH pembuangan
+    # baris kembar (bukan sebelumnya, supaya hasil dedup tidak berubah).
+    # Tanpa ini, data servis memakan ~247 MB memori; setelah ini ~131 MB.
+    # Streamlit Cloud punya batas memori, dan aplikasi akan mati tanpa pesan
+    # jelas ("Oh no. Error running app.") kalau batas itu terlampaui.
+    full = full.drop(columns=[c for c in SERVIS_TAK_DIPAKAI if c in full.columns])
 
     full['TGL PENGIRIMAN'] = pd.to_datetime(full['TGL PENGIRIMAN'], errors='coerce')
     full['TAHUN'] = full['TGL PENGIRIMAN'].dt.year
@@ -248,6 +269,8 @@ def load_sales(file_bytes: bytes, source_kind: str) -> pd.DataFrame:
         raise ValueError(
             "Kolom berikut tidak ditemukan di data penjualan: " + ", ".join(missing)
         )
+
+    df = df.drop(columns=[c for c in JUAL_TAK_DIPAKAI if c in df.columns])
 
     for c in ['HARGA BELI', 'QTY', '@HARGA', 'TOTAL HARGA']:
         df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)

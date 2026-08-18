@@ -1221,6 +1221,7 @@ _penyusun = st.sidebar.text_input(
 _SLIDE_LABELS = {
     "ringkasan": "Ringkasan Kinerja",
     "status": "Komposisi Status",
+    "progres_bulan": "Progres Bulanan",
     "banding_bulan": "Bulan Ini vs Bulan Lalu",
     "harian": "Rekap Transaksi Harian",
     "hari_tertinggi": "Hari Transaksi Tertinggi",
@@ -1341,10 +1342,10 @@ if st.session_state.get("ppt_bytes"):
 # ---------------------------------------------------------------------------
 # TABS
 # ---------------------------------------------------------------------------
-(tab_main, tab_pending, tab_done, tab_cancel, tab_jual, tab_mlf, tab_tek,
- tab_bundling) = st.tabs(
+(tab_main, tab_pending, tab_done, tab_cancel, tab_mati, tab_jual, tab_mlf,
+ tab_tek, tab_bundling) = st.tabs(
     ["📊 Dashboard Utama", "⚠️ Dashboard Pending", "✅ Dashboard Done",
-     "🚫 Dashboard Cancel", "💰 Penjualan", "🎫 Voucher MLF",
+     "🚫 Dashboard Cancel", "🔌 Mati Total", "💰 Penjualan", "🎫 Voucher MLF",
      "🧰 Omzet & Bagi Hasil Teknisi", "🎁 Bundling Aksesoris"]
 )
 
@@ -2893,3 +2894,617 @@ with tab_bundling:
                 "non-aksesoris sesuai kesepakatan.\n\n"
                 "Nilai yang dipakai adalah **TOTAL HARGA** (omzet), belum dikurangi biaya."
             )
+
+
+# =============================================================================
+# TAB 5: MATI TOTAL — SUCCESS RATE JADI NOTA
+# =============================================================================
+KUNCI_MATI_TOTAL = 'MATI TOTAL'
+KOL_NO_KIRIM_JUAL = 'Nomor # Pengiriman Pesanan'
+KOL_NO_KIRIM_SERVIS = 'NOMOR PENGIRIMAN PESANAN'
+
+
+@st.cache_data(show_spinner="Menggabungkan data servis & penjualan...")
+def gabung_mati_total(servis: pd.DataFrame, jual: pd.DataFrame) -> pd.DataFrame:
+    """Gabungkan unit MATI TOTAL dengan nota penjualannya.
+
+    Kunci penggabungan adalah pasangan **CABANG + NOMOR PENGIRIMAN PESANAN**,
+    bukan nomornya saja. Ini wajib: nomor pengiriman berjalan sendiri-sendiri di
+    tiap cabang, dan ada 29.158 nomor yang dipakai lebih dari satu cabang. Kalau
+    digabung hanya lewat nomor, success rate ikut membengkak palsu (79% vs 46%
+    yang sebenarnya).
+    """
+    if (servis is None or servis.empty or jual is None or jual.empty
+            or KOL_NO_KIRIM_SERVIS not in servis.columns
+            or KOL_NO_KIRIM_JUAL not in jual.columns):
+        return pd.DataFrame()
+
+    mt = servis[servis['KERUSAKAN'] == KUNCI_MATI_TOTAL].copy()
+    if mt.empty:
+        return mt
+    mt['NO_KIRIM'] = mt[KOL_NO_KIRIM_SERVIS].astype(str).str.strip().str.upper()
+
+    j = jual.copy()
+    j['NO_KIRIM'] = j[KOL_NO_KIRIM_JUAL].astype(str).str.strip().str.upper()
+    j = j[~j['NO_KIRIM'].isin(['', 'NAN', 'NONE', '-'])]
+    if j.empty:
+        nota = pd.DataFrame(columns=['CABANG', 'NO_KIRIM', 'N_NOTA', 'OMZET',
+                                     'MODAL', 'TGL_NOTA', 'NO_FAKTUR'])
+    else:
+        nota = (j.groupby(['CABANG', 'NO_KIRIM'])
+                 .agg(N_NOTA=('NO FAKTUR', 'nunique'),
+                      OMZET=('TOTAL HARGA', 'sum'),
+                      MODAL=('MODAL', 'sum'),
+                      TGL_NOTA=('TGL', 'min'),
+                      NO_FAKTUR=('NO FAKTUR', 'first'))
+                 .reset_index())
+
+    mt = mt.merge(nota, on=['CABANG', 'NO_KIRIM'], how='left')
+    mt['JADI_NOTA'] = mt['N_NOTA'].notna()
+    mt['OMZET'] = pd.to_numeric(mt['OMZET'], errors='coerce').fillna(0.0)
+    mt['MODAL'] = pd.to_numeric(mt['MODAL'], errors='coerce').fillna(0.0)
+    mt['LABA'] = mt['OMZET'] - mt['MODAL']
+    if 'TGL_NOTA' in mt.columns:
+        mt['JEDA_HARI'] = (pd.to_datetime(mt['TGL_NOTA'], errors='coerce')
+                           - mt['TGL PENGIRIMAN']).dt.days
+    else:
+        mt['JEDA_HARI'] = pd.NA
+    mt.attrs['batas_data_jual'] = jual['TGL'].min()
+    return mt
+
+
+with tab_mati:
+    st.markdown("## Dashboard Mati Total — Tingkat Keberhasilan Jadi Nota")
+    st.caption(
+        "Menelusuri setiap unit dengan kerusakan **MATI TOTAL**: berapa yang "
+        "akhirnya benar-benar menjadi nota penjualan, dan berapa yang lepas."
+    )
+
+    if sales.empty:
+        st.warning(
+            "Dashboard ini menggabungkan **dua sumber**: data servis (nomor "
+            "pengiriman pesanan) dan data penjualan (nota). Data penjualan belum "
+            "termuat, jadi tingkat keberhasilan belum bisa dihitung. Pastikan "
+            "`data/penjualan.csv.gz` ada di repo, atau upload lewat sidebar."
+        )
+    else:
+        mt_all = gabung_mati_total(data, sales)
+
+        if mt_all.empty:
+            st.info("Tidak ada transaksi berkerusakan MATI TOTAL pada data ini.")
+        else:
+            batas = mt_all.attrs.get('batas_data_jual', sales['TGL'].min())
+            batas = pd.Timestamp(batas).normalize().replace(day=1)
+
+            # Unit yang datang sebelum data penjualan dimulai mustahil ketemu
+            # notanya — bukan karena gagal, tapi karena notanya tidak ada di
+            # sumber. Kalau ikut dihitung, success rate jadi ngawur.
+            mt_ukur = mt_all[mt_all['TGL PENGIRIMAN'] >= batas].copy()
+            n_luar = len(mt_all) - len(mt_ukur)
+
+            if mt_ukur.empty:
+                st.warning("Belum ada unit MATI TOTAL pada rentang data penjualan.")
+            else:
+                # ---- masa tunggu wajar: unit baru masuk belum sempat jadi nota
+                jeda = pd.to_numeric(
+                    mt_ukur.loc[mt_ukur['JADI_NOTA'], 'JEDA_HARI'], errors='coerce'
+                ).dropna()
+                jeda_p90 = int(jeda.quantile(0.90)) if len(jeda) >= 30 else 21
+                jeda_med = float(jeda.median()) if len(jeda) else 0.0
+                tgl_akhir = mt_ukur['TGL PENGIRIMAN'].max()
+                ambang_matang = tgl_akhir - pd.Timedelta(days=jeda_p90)
+
+                if n_luar:
+                    st.info(
+                        f"ℹ️ {nfid(n_luar)} unit MATI TOTAL bertanggal sebelum "
+                        f"**{batas.strftime('%d %B %Y')}** dikeluarkan dari "
+                        f"perhitungan — data penjualan belum mencakup periode itu, "
+                        f"sehingga notanya mustahil ditemukan dan akan terhitung "
+                        f"'gagal' secara keliru."
+                    )
+
+                sub = apply_filters(mt_ukur, f_tahun, f_bulan, f_cabang)
+
+                if sub.empty:
+                    st.warning("Tidak ada data MATI TOTAL untuk filter yang dipilih.")
+                else:
+                    n_unit = len(sub)
+                    n_jadi = int(sub['JADI_NOTA'].sum())
+                    n_gagal = n_unit - n_jadi
+                    rate = n_jadi / n_unit * 100 if n_unit else 0.0
+                    omzet = float(sub['OMZET'].sum())
+                    laba = float(sub['LABA'].sum())
+                    rata_nota = (omzet / n_jadi) if n_jadi else 0.0
+                    porsi_mt = (n_unit / len(apply_filters(data, f_tahun, f_bulan, f_cabang))
+                                * 100) if len(apply_filters(data, f_tahun, f_bulan, f_cabang)) else 0.0
+
+                    warna_rate = ('linear-gradient(135deg,#16a34a,#22c55e)' if rate >= 55
+                                  else ('linear-gradient(135deg,#f59e0b,#fbbf24)'
+                                        if rate >= 40
+                                        else 'linear-gradient(135deg,#dc2626,#ef4444)'))
+                    cards = [
+                        {'label': 'Unit Mati Total', 'value': nfid(n_unit),
+                         'sub': f"{pctid(porsi_mt)} dari seluruh transaksi",
+                         'grad': 'linear-gradient(135deg,#3b5bfd,#5a72ff)'},
+                        {'label': 'Jadi Nota', 'value': nfid(n_jadi),
+                         'sub': 'unit yang menghasilkan penjualan',
+                         'grad': 'linear-gradient(135deg,#16a34a,#22c55e)'},
+                        {'label': 'Success Rate', 'value': pctid(rate),
+                         'sub': 'jadi nota ÷ unit masuk', 'grad': warna_rate},
+                        {'label': 'Tidak Jadi Nota', 'value': nfid(n_gagal),
+                         'sub': f"{pctid(100 - rate)} — potensi hilang",
+                         'grad': 'linear-gradient(135deg,#dc2626,#ef4444)'},
+                        {'label': 'Omzet dari Mati Total', 'value': rp(omzet),
+                         'sub': f"laba kotor {rp(laba)} (blm potong bagi hasil)",
+                         'grad': 'linear-gradient(135deg,#7c3aed,#a855f7)'},
+                        {'label': 'Rata-rata per Nota', 'value': rp(rata_nota),
+                         'sub': f"jeda masuk→nota: {nfid(jeda_med, 0)} hari (median)",
+                         'grad': 'linear-gradient(135deg,#0f8a82,#17a3a3)'},
+                    ]
+                    st.markdown(kpi_html(cards), unsafe_allow_html=True)
+                    st.write("")
+
+                    # =========================================================
+                    # GRAFIK BATANG PER BULAN
+                    # =========================================================
+                    st.markdown("#### Rekap per Bulan — Jadi Nota vs Tidak")
+
+                    th_opts = sorted(int(t) for t in sub['TAHUN'].dropna().unique())
+                    if f_tahun != 'Semua Tahun':
+                        th_pilih = int(f_tahun)
+                    else:
+                        th_pilih = st.selectbox(
+                            "Tahun grafik", th_opts, index=len(th_opts) - 1,
+                            format_func=lambda x: str(x), key='mt_tahun_grafik')
+
+                    bl = sub[sub['TAHUN'] == th_pilih].copy()
+                    if bl.empty:
+                        st.caption("Tidak ada data untuk tahun tersebut.")
+                    else:
+                        g = (bl.groupby(bl['TGL PENGIRIMAN'].dt.month)
+                               .agg(unit=('JADI_NOTA', 'size'),
+                                    jadi=('JADI_NOTA', 'sum'),
+                                    omzet=('OMZET', 'sum'),
+                                    akhir=('TGL PENGIRIMAN', 'max'))
+                               .reindex(range(1, 13)))
+                        g = g[g['unit'].notna()]
+                        g['gagal'] = g['unit'] - g['jadi']
+                        g['rate'] = g['jadi'] / g['unit'] * 100
+                        g['mentah'] = g['akhir'] > ambang_matang
+                        nama_bl = [BULAN_NAMES[int(i)] for i in g.index]
+                        tanda = ['*' if m else '' for m in g['mentah']]
+                        label_bl = [f"{n}{t}" for n, t in zip(nama_bl, tanda)]
+
+                        fig = go.Figure()
+                        fig.add_bar(x=label_bl, y=g['jadi'], name='Jadi nota',
+                                    marker_color='#16a34a',
+                                    text=[nfid(v) for v in g['jadi']],
+                                    textposition='inside',
+                                    hovertemplate='%{x}<br>Jadi nota: %{y:,.0f}<extra></extra>')
+                        fig.add_bar(x=label_bl, y=g['gagal'], name='Tidak jadi nota',
+                                    marker_color='#dc2626',
+                                    text=[nfid(v) for v in g['gagal']],
+                                    textposition='inside',
+                                    hovertemplate='%{x}<br>Tidak jadi: %{y:,.0f}<extra></extra>')
+                        fig.add_trace(go.Scatter(
+                            x=label_bl, y=g['rate'], name='Success rate',
+                            mode='lines+markers+text', yaxis='y2',
+                            line=dict(color='#1f3864', width=3),
+                            marker=dict(size=9, color='#1f3864'),
+                            text=[pctid(v) for v in g['rate']],
+                            textposition='top center',
+                            textfont=dict(size=10, color='#1f3864'),
+                            hovertemplate='%{x}<br>Success rate: %{y:.1f}%<extra></extra>'))
+                        fig.update_layout(
+                            barmode='stack', height=430,
+                            margin=dict(l=10, r=10, t=30, b=10),
+                            yaxis=dict(title='Jumlah unit'),
+                            yaxis2=dict(title='Success rate (%)', overlaying='y',
+                                        side='right', range=[0, 100], showgrid=False),
+                            legend=dict(orientation='h', yanchor='bottom', y=1.02,
+                                        x=0),
+                            plot_bgcolor='#ffffff')
+                        st.plotly_chart(fig, use_container_width=True, key='mt_bulan')
+
+                        if bool(g['mentah'].any()):
+                            st.caption(
+                                f"* Bulan bertanda bintang belum matang: unit yang "
+                                f"baru masuk dalam {jeda_p90} hari terakhir umumnya "
+                                f"belum sempat dinotakan (90% nota terbit dalam "
+                                f"{jeda_p90} hari sejak unit masuk). Success rate "
+                                f"bulan itu akan naik sendiri seiring waktu — jangan "
+                                f"dijadikan dasar penilaian."
+                            )
+
+                        tb = pd.DataFrame({
+                            'Bulan': nama_bl,
+                            'Unit Mati Total': g['unit'].astype(int).values,
+                            'Jadi Nota': g['jadi'].astype(int).values,
+                            'Tidak Jadi': g['gagal'].astype(int).values,
+                            'Success Rate': g['rate'].values,
+                            'Omzet': g['omzet'].values,
+                        })
+                        with st.expander("Lihat tabel angka per bulan"):
+                            st.dataframe(
+                                tb.style.format({
+                                    'Unit Mati Total': '{:,.0f}', 'Jadi Nota': '{:,.0f}',
+                                    'Tidak Jadi': '{:,.0f}', 'Success Rate': '{:.1f}%',
+                                    'Omzet': 'Rp {:,.0f}'}),
+                                use_container_width=True, hide_index=True,
+                                key='mt_tabel_bulan')
+
+                    # =========================================================
+                    # PER TEKNISI
+                    # =========================================================
+                    st.markdown("---")
+                    st.markdown("#### Tingkat Keberhasilan per Teknisi")
+
+                    gt = (sub.groupby('TEKNISI')
+                             .agg(Unit=('JADI_NOTA', 'size'),
+                                  Jadi=('JADI_NOTA', 'sum'),
+                                  Omzet=('OMZET', 'sum'),
+                                  Laba=('LABA', 'sum')))
+                    gt['Tidak Jadi'] = gt['Unit'] - gt['Jadi']
+                    gt['Success Rate'] = gt['Jadi'] / gt['Unit'] * 100
+                    gt['Omzet / Unit'] = gt['Omzet'] / gt['Unit']
+
+                    c1, c2 = st.columns([1, 1])
+                    with c1:
+                        min_unit = st.number_input(
+                            "Minimal unit mati total agar teknisi ditampilkan",
+                            min_value=1, max_value=200, value=20, step=5,
+                            key='mt_min_unit',
+                            help="Menyaring teknisi bervolume kecil supaya "
+                                 "persentasenya tidak menyesatkan.")
+                    with c2:
+                        top_n = st.slider("Jumlah teknisi pada grafik", 5, 40, 15,
+                                          key='mt_topn')
+
+                    gt_layak = gt[gt['Unit'] >= min_unit].copy()
+                    if gt_layak.empty:
+                        st.caption(
+                            f"Tidak ada teknisi dengan minimal {min_unit} unit "
+                            f"mati total pada filter ini. Turunkan angkanya.")
+                    else:
+                        rata_rate = rate
+                        gg = gt_layak.sort_values('Success Rate', ascending=False).head(top_n)
+                        gg = gg.iloc[::-1]     # plotly bar horizontal dari bawah
+
+                        figt = go.Figure()
+                        figt.add_bar(
+                            y=gg.index, x=gg['Jadi'], orientation='h',
+                            name='Jadi nota', marker_color='#16a34a',
+                            hovertemplate='%{y}<br>Jadi nota: %{x:,.0f}<extra></extra>')
+                        figt.add_bar(
+                            y=gg.index, x=gg['Tidak Jadi'], orientation='h',
+                            name='Tidak jadi nota', marker_color='#dc2626',
+                            hovertemplate='%{y}<br>Tidak jadi: %{x:,.0f}<extra></extra>')
+                        for nm, r, u in zip(gg.index, gg['Success Rate'], gg['Unit']):
+                            figt.add_annotation(
+                                y=nm, x=u, text=f"  {pctid(r)}", showarrow=False,
+                                xanchor='left', font=dict(
+                                    size=11, color=('#16a34a' if r >= rata_rate
+                                                    else '#c0392b')))
+                        figt.update_layout(
+                            barmode='stack', height=max(320, 26 * len(gg) + 90),
+                            margin=dict(l=10, r=90, t=30, b=10),
+                            xaxis=dict(title='Jumlah unit mati total'),
+                            legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0),
+                            plot_bgcolor='#ffffff')
+                        st.plotly_chart(figt, use_container_width=True, key='mt_teknisi')
+                        st.caption(
+                            f"Diurutkan dari success rate tertinggi. Angka di ujung "
+                            f"batang berwarna hijau bila di atas rata-rata "
+                            f"({pctid(rata_rate)}) dan merah bila di bawahnya. "
+                            f"Panjang batang menunjukkan beban unit — teknisi dengan "
+                            f"batang panjang dan porsi merah besar adalah prioritas.")
+
+                        st.markdown("##### Rekap Lengkap per Teknisi")
+                        gt_show = gt_layak.copy()
+                        gt_show['CABANG'] = (sub.groupby('TEKNISI')['CABANG']
+                                             .agg(lambda s: ', '.join(sorted(set(s))[:3]))
+                                             .reindex(gt_show.index))
+                        gt_show = gt_show[['CABANG', 'Unit', 'Jadi', 'Tidak Jadi',
+                                           'Success Rate', 'Omzet', 'Laba',
+                                           'Omzet / Unit']]
+                        gt_show = gt_show.rename(columns={'Jadi': 'Jadi Nota'})
+                        gt_show = gt_show.sort_values('Success Rate', ascending=False)
+                        st.dataframe(
+                            gt_show.style.format({
+                                'Unit': '{:,.0f}', 'Jadi Nota': '{:,.0f}',
+                                'Tidak Jadi': '{:,.0f}', 'Success Rate': '{:.1f}%',
+                                'Omzet': 'Rp {:,.0f}', 'Laba': 'Rp {:,.0f}',
+                                'Omzet / Unit': 'Rp {:,.0f}'}),
+                            use_container_width=True, height=420, key='mt_tabel_teknisi')
+
+                        st.download_button(
+                            "⬇️ Unduh rekap teknisi mati total (CSV)",
+                            data=gt_show.reset_index().to_csv(index=False).encode('utf-8-sig'),
+                            file_name=f"mati_total_per_teknisi_{f_tahun}.csv",
+                            mime="text/csv", key='mt_unduh_teknisi')
+
+                    # =========================================================
+                    # PER CABANG + SEBAB GAGAL
+                    # =========================================================
+                    st.markdown("---")
+                    cc1, cc2 = st.columns([1, 1])
+
+                    with cc1:
+                        st.markdown("#### Success Rate per Cabang")
+                        gc = (sub.groupby('CABANG')
+                                 .agg(Unit=('JADI_NOTA', 'size'),
+                                      Jadi=('JADI_NOTA', 'sum'),
+                                      Omzet=('OMZET', 'sum')))
+                        gc['Success Rate'] = gc['Jadi'] / gc['Unit'] * 100
+                        gc = gc.sort_values('Success Rate', ascending=False)
+                        figc = px.bar(
+                            gc.reset_index(), x='Success Rate', y='CABANG',
+                            orientation='h', text=gc['Success Rate'].map(pctid).values,
+                            color='Success Rate', color_continuous_scale=
+                            [(0, '#c0392b'), (0.5, '#e0b31f'), (1, '#16a34a')])
+                        figc.update_layout(
+                            height=max(320, 22 * len(gc) + 80),
+                            margin=dict(l=10, r=10, t=20, b=10),
+                            yaxis=dict(autorange='reversed', title=''),
+                            coloraxis_showscale=False, plot_bgcolor='#ffffff')
+                        figc.update_traces(textposition='outside', cliponaxis=False)
+                        st.plotly_chart(figc, use_container_width=True, key='mt_cabang')
+
+                    with cc2:
+                        st.markdown("#### Ke Mana Unit yang Tidak Jadi Nota?")
+                        gagal = sub[~sub['JADI_NOTA']]
+                        if gagal.empty:
+                            st.caption("Semua unit mati total menjadi nota.")
+                        else:
+                            gs = (gagal['STATUS PENGERJAAN'].fillna('(tanpa status)')
+                                  .astype(str).str.strip().str.upper()
+                                  .value_counts().head(10))
+                            figs = px.bar(
+                                x=gs.values, y=gs.index, orientation='h',
+                                text=[f"{nfid(v)} ({pctid(v / len(gagal) * 100)})"
+                                      for v in gs.values],
+                                color_discrete_sequence=['#c0392b'])
+                            figs.update_layout(
+                                height=max(320, 26 * len(gs) + 80),
+                                margin=dict(l=10, r=10, t=20, b=10),
+                                xaxis=dict(title='Jumlah unit'),
+                                yaxis=dict(autorange='reversed', title=''),
+                                plot_bgcolor='#ffffff')
+                            figs.update_traces(textposition='outside', cliponaxis=False)
+                            st.plotly_chart(figs, use_container_width=True,
+                                            key='mt_sebab')
+                            st.caption(
+                                "Status pengerjaan terakhir dari unit yang tidak "
+                                "pernah menjadi nota. Kelompok CANCEL adalah "
+                                "kehilangan nyata; kelompok PENDING masih bisa "
+                                "diselamatkan kalau segera dikerjakan.")
+
+                    # =========================================================
+                    # DETAIL
+                    # =========================================================
+                    st.markdown("---")
+                    with st.expander("🔎 Detail unit mati total"):
+                        hanya_gagal = st.checkbox(
+                            "Tampilkan hanya yang belum/tidak jadi nota", value=True,
+                            key='mt_hanya_gagal')
+                        dd = sub[~sub['JADI_NOTA']] if hanya_gagal else sub
+                        kol = [KOL_NO_KIRIM_SERVIS, 'TGL PENGIRIMAN', 'CABANG',
+                               'TEKNISI', 'STATUS PENGERJAAN', 'MERK UNIT',
+                               'TIPE UNIT', 'NO_FAKTUR', 'TGL_NOTA', 'OMZET',
+                               'JEDA_HARI']
+                        kol = [c for c in kol if c in dd.columns]
+                        dd = dd[kol].rename(columns={
+                            KOL_NO_KIRIM_SERVIS: 'No Pengiriman',
+                            'NO_FAKTUR': 'No Faktur', 'TGL_NOTA': 'Tgl Nota',
+                            'JEDA_HARI': 'Jeda (hari)'})
+                        q = st.text_input("Cari nomor / teknisi / cabang",
+                                          key='mt_cari')
+                        if q:
+                            m = dd.apply(lambda r: q.upper() in ' '.join(
+                                str(v) for v in r.values).upper(), axis=1)
+                            dd = dd[m]
+                        dd = dd.sort_values('TGL PENGIRIMAN', ascending=False)
+                        st.caption(f"{nfid(len(dd))} unit (ditampilkan maks 1.000).")
+                        st.dataframe(dd.head(1000), use_container_width=True,
+                                     height=380, key='mt_detail')
+                        st.download_button(
+                            "⬇️ Unduh daftar ini (CSV)",
+                            data=dd.to_csv(index=False).encode('utf-8-sig'),
+                            file_name="mati_total_detail.csv", mime="text/csv",
+                            key='mt_unduh_detail')
+
+                    # =========================================================
+                    # PERBANDINGAN PERIODE
+                    # =========================================================
+                    st.markdown("### 📊 Perbandingan Periode")
+                    _mt_cab = (mt_ukur if f_cabang == 'Semua Cabang'
+                               else mt_ukur[mt_ukur['CABANG'] == f_cabang])
+                    _pot_mt = potong_periode(_mt_cab, 'TGL PENGIRIMAN')
+                    _metrik_mt = [
+                        ("Unit Mati Total", lambda d: len(d), lambda v: nfid(v), True),
+                        ("Jadi Nota", lambda d: int(d['JADI_NOTA'].sum()),
+                         lambda v: nfid(v), True),
+                        ("Success Rate", lambda d: (d['JADI_NOTA'].sum() / len(d) * 100)
+                         if len(d) else 0, lambda v: pctid(v), True),
+                        ("Omzet Mati Total", lambda d: float(d['OMZET'].sum()),
+                         lambda v: rp(v), True),
+                        ("Rata-rata per Nota",
+                         lambda d: (float(d['OMZET'].sum()) / int(d['JADI_NOTA'].sum()))
+                         if int(d['JADI_NOTA'].sum()) else 0, lambda v: rp(v), True),
+                    ]
+                    render_banding(_pot_mt, _metrik_mt, key_prefix='mt')
+                    st.caption(
+                        f"⚠️ Khusus baris **Success Rate**, bulan berjalan hampir "
+                        f"selalu tampak lebih rendah — sebagian unitnya baru masuk "
+                        f"dan belum sampai tahap nota (90% nota terbit dalam "
+                        f"{jeda_p90} hari). Untuk penilaian yang adil, pakai bulan "
+                        f"yang sudah lewat minimal {jeda_p90} hari.")
+
+                    # =========================================================
+                    # ANALISA
+                    # =========================================================
+                    st.markdown("### 🧭 Analisa & Tindak Lanjut")
+
+                    # tren success rate pada bulan-bulan yang sudah matang
+                    _mat = _mt_cab[_mt_cab['TGL PENGIRIMAN'] <= ambang_matang]
+                    _tren = (_mat.groupby(_mat['TGL PENGIRIMAN'].dt.to_period('M'))
+                                 .agg(u=('JADI_NOTA', 'size'), j=('JADI_NOTA', 'sum')))
+                    _tren['r'] = _tren['j'] / _tren['u'] * 100
+                    _tren = _tren[_tren['u'] >= 30]
+
+                    _items = []
+
+                    if len(_tren) >= 2:
+                        _awal, _akhir = float(_tren['r'].iloc[0]), float(_tren['r'].iloc[-1])
+                        _sel = _akhir - _awal
+                        _arah = ("naik" if _sel > 1 else ("turun" if _sel < -1 else "datar"))
+                        _jenis = ('baik' if _sel > 1 else ('aksi' if _sel < -1 else 'info'))
+                        _items.append((
+                            _jenis, f"Tren success rate {_arah}",
+                            f"Pada bulan-bulan yang sudah matang, success rate bergerak "
+                            f"dari <b>{pctid(_awal)}</b> ({_tren.index[0]}) ke "
+                            f"<b>{pctid(_akhir)}</b> ({_tren.index[-1]}) — selisih "
+                            f"<b>{pctid(abs(_sel))}</b>. Rata-rata sepanjang periode "
+                            f"matang: <b>{pctid(float(_tren['j'].sum() / _tren['u'].sum() * 100))}</b>."))
+
+                    _hilang = n_gagal * (omzet / n_jadi if n_jadi else 0)
+                    _items.append((
+                        'aksi', "Nilai yang belum tertutup",
+                        f"<b>{nfid(n_gagal)} unit</b> mati total tidak menjadi nota. "
+                        f"Dengan nilai rata-rata <b>{rp(rata_nota)}</b> per nota, itu "
+                        f"setara peluang <b>{rp(_hilang)}</b> yang tidak terealisasi. "
+                        f"Angka ini adalah batas atas — sebagian unit memang tidak "
+                        f"layak diperbaiki — tapi tetap menunjukkan besarnya taruhan "
+                        f"pada satu jenis kerusakan saja."))
+
+                    if not gagal.empty:
+                        _st = (gagal['STATUS PENGERJAAN'].fillna('(tanpa status)')
+                               .astype(str).str.upper())
+                        _n_cancel = int(_st.str.startswith('CANCEL').sum())
+                        _n_pending = int(_st.str.startswith('PENDING').sum())
+                        _items.append((
+                            'perhatian', "Yang masih bisa diselamatkan",
+                            f"Dari unit yang belum jadi nota, <b>{nfid(_n_cancel)}</b> "
+                            f"({pctid(_n_cancel / len(gagal) * 100)}) sudah berstatus "
+                            f"CANCEL — ini kehilangan yang sudah terjadi. Namun "
+                            f"<b>{nfid(_n_pending)}</b> masih PENDING dan belum "
+                            f"tertutup: unit inilah yang paling layak dikejar minggu "
+                            f"ini, karena keputusannya belum final di tangan pelanggan."))
+
+                    if not gt_layak.empty and len(gt_layak) >= 4:
+                        _srt = gt_layak.sort_values('Success Rate')
+                        _bwh = _srt.head(max(1, len(_srt) // 4))
+                        _ats = _srt.tail(max(1, len(_srt) // 4))
+                        _r_bwh = float(_bwh['Jadi'].sum() / _bwh['Unit'].sum() * 100)
+                        _r_ats = float(_ats['Jadi'].sum() / _ats['Unit'].sum() * 100)
+                        _tambah = (_r_ats - _r_bwh) / 100 * float(_bwh['Unit'].sum())
+                        _items.append((
+                            'aksi', "Jurang antar teknisi adalah peluang terbesar",
+                            f"Kuartil teratas ({nfid(len(_ats))} teknisi) menutup "
+                            f"<b>{pctid(_r_ats)}</b> unit mati total, sementara kuartil "
+                            f"terbawah ({nfid(len(_bwh))} teknisi) hanya "
+                            f"<b>{pctid(_r_bwh)}</b> — beda <b>{pctid(_r_ats - _r_bwh)}</b> "
+                            f"pada jenis kerusakan yang sama. Kalau kelompok terbawah "
+                            f"naik ke tingkat kelompok teratas, tambahannya sekitar "
+                            f"<b>{nfid(_tambah, 0)} nota</b> (± {rp(_tambah * rata_nota)}). "
+                            f"Terendah saat ini: <b>{_srt.index[0]}</b> "
+                            f"({pctid(float(_srt['Success Rate'].iloc[0]))} dari "
+                            f"{nfid(int(_srt['Unit'].iloc[0]))} unit). Selisih sebesar "
+                            f"ini biasanya soal cara mendiagnosa dan menjelaskan "
+                            f"estimasi ke pelanggan, bukan soal keberuntungan."))
+
+                    if len(gc) >= 2:
+                        _gc = gc[gc['Unit'] >= 30].sort_values('Success Rate')
+                        if len(_gc) >= 2:
+                            _items.append((
+                                'perhatian', "Cabang yang perlu ditengok",
+                                f"Cabang <b>{_gc.index[0]}</b> hanya menutup "
+                                f"<b>{pctid(float(_gc['Success Rate'].iloc[0]))}</b> dari "
+                                f"{nfid(int(_gc['Unit'].iloc[0]))} unit mati total, "
+                                f"sementara <b>{_gc.index[-1]}</b> mencapai "
+                                f"<b>{pctid(float(_gc['Success Rate'].iloc[-1]))}</b>. "
+                                f"Perbedaan sebesar ini antar cabang biasanya berasal "
+                                f"dari ketersediaan sparepart atau cara admin "
+                                f"menyampaikan estimasi biaya — dua hal yang bisa "
+                                f"disamakan tanpa menambah biaya."))
+
+                    _items.append((
+                        'info', "Cara angka ini dihitung",
+                        f"Satu unit dianggap <b>berhasil</b> bila nomor pengiriman "
+                        f"pesanannya muncul sebagai nota di data penjualan, "
+                        f"dicocokkan lewat pasangan <b>Cabang + Nomor Pengiriman "
+                        f"Pesanan</b>. Pasangan ini wajib karena penomoran berjalan "
+                        f"sendiri-sendiri di tiap cabang. Sebagai uji kewajaran: "
+                        f"unit berstatus DONE tercocokkan sekitar 92%, sedangkan "
+                        f"CANCEL hanya 2% — persis seperti yang diharapkan bila "
+                        f"kuncinya benar."))
+
+                    panel_analisa(_items)
+
+                    tombol_pdf(
+                        "Dashboard Mati Total", _pot_mt, _metrik_mt,
+                        temuan=[(j, ju, re.sub('<[^>]+>', '', isi))
+                                for j, ju, isi in _items],
+                        kpis=[{'label': 'Unit Mati Total', 'value': nfid(n_unit),
+                               'sub': f"{pctid(porsi_mt)} dari seluruh transaksi",
+                               'warna': _PN},
+                              {'label': 'Jadi Nota', 'value': nfid(n_jadi),
+                               'sub': 'menghasilkan penjualan', 'warna': _PG},
+                              {'label': 'Success Rate', 'value': pctid(rate),
+                               'sub': 'jadi nota / unit masuk',
+                               'warna': (_PG if rate >= 55 else
+                                         (_PA if rate >= 40 else _PR))},
+                              {'label': 'Tidak Jadi Nota', 'value': nfid(n_gagal),
+                               'sub': f"{pctid(100 - rate)} dari unit masuk",
+                               'warna': _PR},
+                              {'label': 'Omzet Mati Total', 'value': rp(omzet),
+                               'sub': f"laba kotor {rp(laba)}", 'warna': _PN},
+                              {'label': 'Rata-rata per Nota', 'value': rp(rata_nota),
+                               'sub': f"jeda {nfid(jeda_med, 0)} hari (median)",
+                               'warna': _PA}],
+                        metodologi=(
+                            f"Unit MATI TOTAL diambil dari kolom KERUSAKAN UTAMA pada "
+                            f"data servis, lalu dicocokkan ke data penjualan memakai "
+                            f"pasangan CABANG + NOMOR PENGIRIMAN PESANAN. Unit "
+                            f"bertanggal sebelum {batas.strftime('%d %B %Y')} "
+                            f"dikeluarkan karena data penjualan belum mencakup periode "
+                            f"tersebut ({nfid(n_luar)} unit). Bulan berjalan ditandai "
+                            f"belum matang bila unitnya masuk dalam {jeda_p90} hari "
+                            f"terakhir, sebab 90% nota terbit dalam rentang itu "
+                            f"(median {nfid(jeda_med, 0)} hari)."),
+                        ringkasan=(
+                            f"Dari {nfid(n_unit)} unit mati total, {nfid(n_jadi)} "
+                            f"({pctid(rate)}) berhasil menjadi nota senilai "
+                            f"{rp(omzet)}. Sisanya {nfid(n_gagal)} unit tidak tertutup."),
+                        key='mt')
+
+                    with st.expander("ℹ️ Cara perhitungan & catatan"):
+                        st.write(
+                            f"**Yang dihitung.** Setiap baris transaksi servis dengan "
+                            f"KERUSAKAN UTAMA = `MATI TOTAL`. Baris kembar sudah "
+                            f"dibuang lebih dulu saat data dimuat.\n\n"
+                            f"**Kunci penggabungan.** `CABANG` + `NOMOR PENGIRIMAN "
+                            f"PESANAN` (servis) dicocokkan dengan `CABANG` + "
+                            f"`Nomor # Pengiriman Pesanan` (penjualan). Nomornya saja "
+                            f"tidak cukup — ada 29.158 nomor yang dipakai lebih dari "
+                            f"satu cabang, dan menggabungkannya secara global membuat "
+                            f"success rate melonjak palsu ke 79%.\n\n"
+                            f"**Batas periode.** Data penjualan mulai "
+                            f"{batas.strftime('%d %B %Y')}. Unit servis sebelum "
+                            f"tanggal itu dikeluarkan ({nfid(n_luar)} unit), karena "
+                            f"notanya memang tidak ada di sumber — bukan karena gagal.\n\n"
+                            f"**Masa tunggu.** Jeda dari unit masuk sampai terbit nota: "
+                            f"median {nfid(jeda_med, 0)} hari, 90% selesai dalam "
+                            f"{jeda_p90} hari. Karena itu unit yang baru masuk "
+                            f"{jeda_p90} hari terakhir belum bisa dinilai.\n\n"
+                            f"**Omzet.** Seluruh isi nota yang tertaut ke unit "
+                            f"tersebut — termasuk sparepart dan jasa — memakai kolom "
+                            f"TOTAL HARGA. Modal memakai HARGA BELI yang di sumber ini "
+                            f"sudah berupa total per baris.\n\n"
+                            f"**Soal angka laba.** Nilainya tinggi (sekitar 84%) karena "
+                            f"sebagian besar nota mati total berisi **jasa**, dan baris "
+                            f"jasa nyaris tidak punya HARGA BELI. Jadi ini laba kotor "
+                            f"sebelum dipotong bagi hasil teknisi dan biaya operasional "
+                            f"— bukan keuntungan bersih. Untuk perhitungan bagi hasil, "
+                            f"lihat tab **Omzet & Bagi Hasil Teknisi**."
+                        )

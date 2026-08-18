@@ -167,9 +167,16 @@ def _read_xlsx_raw(file_bytes: bytes) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True, sort=False)
 
 
-def _read_csv_gz_raw(file_bytes: bytes) -> pd.DataFrame:
-    """Baca file data bawaan (csv terkompresi gzip) yang kolom CABANG-nya sudah ada."""
-    return pd.read_csv(io.BytesIO(file_bytes), compression='gzip')
+def _read_csv_gz_raw(file_bytes: bytes, buang=()) -> pd.DataFrame:
+    """Baca file data bawaan (csv terkompresi gzip) yang kolom CABANG-nya sudah ada.
+
+    Kolom pada `buang` tidak ikut dibaca sama sekali — bukan dibaca lalu
+    dihapus. Bedanya besar untuk memori puncak: pandas tidak pernah membentuk
+    kolom itu di memori.
+    """
+    buang = set(buang)
+    return pd.read_csv(io.BytesIO(file_bytes), compression='gzip',
+                       usecols=(lambda c: c not in buang) if buang else None)
 
 
 # Kolom yang tidak pernah ditampilkan atau dihitung dashboard. Dibuang saat
@@ -189,7 +196,7 @@ JUAL_TAK_DIPAKAI = [
 @st.cache_data(show_spinner="Membaca & memproses data (bisa beberapa puluh detik untuk file besar)...")
 def load_data(file_bytes: bytes, source_kind: str) -> pd.DataFrame:
     if source_kind == 'csv_gz':
-        full = _read_csv_gz_raw(file_bytes)
+        full = _read_csv_gz_raw(file_bytes, SERVIS_TAK_DIPAKAI)
     else:
         full = _read_xlsx_raw(file_bytes)
 
@@ -209,11 +216,8 @@ def load_data(file_bytes: bytes, source_kind: str) -> pd.DataFrame:
     full = full.drop_duplicates(subset=original_cols + ['CABANG'], keep='first').reset_index(drop=True)
     total_unique = len(full)
 
-    # Kolom yang tidak dipakai dashboard mana pun dibuang SETELAH pembuangan
-    # baris kembar (bukan sebelumnya, supaya hasil dedup tidak berubah).
-    # Tanpa ini, data servis memakan ~247 MB memori; setelah ini ~131 MB.
-    # Streamlit Cloud punya batas memori, dan aplikasi akan mati tanpa pesan
-    # jelas ("Oh no. Error running app.") kalau batas itu terlampaui.
+    # Untuk sumber .xlsx, kolom tak terpakai baru bisa dibuang di sini
+    # (pada sumber .csv.gz kolomnya sudah tidak ikut dibaca sejak awal).
     full = full.drop(columns=[c for c in SERVIS_TAK_DIPAKAI if c in full.columns])
 
     full['TGL PENGIRIMAN'] = pd.to_datetime(full['TGL PENGIRIMAN'], errors='coerce')
@@ -247,7 +251,7 @@ def load_sales(file_bytes: bytes, source_kind: str) -> pd.DataFrame:
     Karena itu MODAL = HARGA BELI (tidak dikalikan QTY lagi).
     """
     if source_kind == 'csv_gz':
-        df = pd.read_csv(io.BytesIO(file_bytes), compression='gzip')
+        df = _read_csv_gz_raw(file_bytes, JUAL_TAK_DIPAKAI)
     else:
         xls = pd.ExcelFile(io.BytesIO(file_bytes), engine='openpyxl')
         frames = []
@@ -1371,7 +1375,7 @@ if st.session_state.get("ppt_bytes"):
     ["📊 Dashboard Utama", "⚠️ Dashboard Pending", "✅ Dashboard Done",
      "🚫 Dashboard Cancel", "🔌 Mati Total", "💰 Penjualan", "🎫 Voucher MLF",
      "🧰 Omzet & Bagi Hasil Teknisi", "🎁 Bundling Aksesoris",
-     "🏆 Reward Nota Pelanggan"]
+     "🏆 Budget Bundling Nota"]
 )
 
 # =============================================================================
@@ -2600,7 +2604,10 @@ with tab_bundling:
     elif sales_f.empty:
         st.warning("Tidak ada data penjualan untuk filter yang dipilih.")
     else:
-        sb = sales_f.copy()
+        # Hanya kolom yang dipakai yang disalin — menyalin seluruh tabel
+        # penjualan di sini sempat menghabiskan ratusan MB memori.
+        sb = sales_f[['CABANG', 'NO FAKTUR', 'KATEGORI', 'QTY', 'TOTAL HARGA',
+                      'LABA', 'TGL', 'PENJUAL', 'BARANG']].copy()
         sb['IS_AKS'] = sb['KATEGORI'].isin(['AKSESORIS', 'ACCESORIES'])
 
         # Satu nota = kombinasi CABANG + NO FAKTUR, karena penomoran faktur
@@ -2930,7 +2937,8 @@ KOL_NO_KIRIM_SERVIS = 'NOMOR PENGIRIMAN PESANAN'
 
 
 @st.cache_data(show_spinner="Menggabungkan data servis & penjualan...")
-def gabung_mati_total(servis: pd.DataFrame, jual: pd.DataFrame) -> pd.DataFrame:
+def gabung_mati_total(_servis: pd.DataFrame, _jual: pd.DataFrame,
+                      kunci_cache) -> pd.DataFrame:
     """Gabungkan unit MATI TOTAL dengan nota penjualannya.
 
     Kunci penggabungan adalah pasangan **CABANG + NOMOR PENGIRIMAN PESANAN**,
@@ -2938,7 +2946,13 @@ def gabung_mati_total(servis: pd.DataFrame, jual: pd.DataFrame) -> pd.DataFrame:
     tiap cabang, dan ada 29.158 nomor yang dipakai lebih dari satu cabang. Kalau
     digabung hanya lewat nomor, success rate ikut membengkak palsu (79% vs 46%
     yang sebenarnya).
+
+    Dua argumen pertama diawali garis bawah supaya Streamlit tidak menghitung
+    sidik jari (hash) seluruh isinya pada setiap penekanan tombol — pada data
+    sebesar ini prosesnya berat dan boros memori. Sebagai gantinya, `kunci_cache`
+    yang ringan dipakai untuk menentukan kapan hasilnya perlu dihitung ulang.
     """
+    servis, jual = _servis, _jual
     if (servis is None or servis.empty or jual is None or jual.empty
             or KOL_NO_KIRIM_SERVIS not in servis.columns
             or KOL_NO_KIRIM_JUAL not in jual.columns):
@@ -2949,8 +2963,17 @@ def gabung_mati_total(servis: pd.DataFrame, jual: pd.DataFrame) -> pd.DataFrame:
         return mt
     mt['NO_KIRIM'] = mt[KOL_NO_KIRIM_SERVIS].astype(str).str.strip().str.upper()
 
-    j = jual.copy()
-    j['NO_KIRIM'] = j[KOL_NO_KIRIM_JUAL].astype(str).str.strip().str.upper()
+    # Hanya kolom yang benar-benar dipakai yang disalin. Menyalin seluruh
+    # tabel penjualan (jual.copy()) sempat memakan ratusan MB memori dan
+    # membuat aplikasi mati di Streamlit Cloud.
+    j = pd.DataFrame({
+        'CABANG': jual['CABANG'],
+        'NO_KIRIM': jual[KOL_NO_KIRIM_JUAL].astype(str).str.strip().str.upper(),
+        'NO FAKTUR': jual['NO FAKTUR'],
+        'TOTAL HARGA': jual['TOTAL HARGA'],
+        'MODAL': jual['MODAL'],
+        'TGL': jual['TGL'],
+    })
     j = j[~j['NO_KIRIM'].isin(['', 'NAN', 'NONE', '-'])]
     if j.empty:
         nota = pd.DataFrame(columns=['CABANG', 'NO_KIRIM', 'N_NOTA', 'OMZET',
@@ -2993,7 +3016,10 @@ with tab_mati:
             "`data/penjualan.csv.gz` ada di repo, atau upload lewat sidebar."
         )
     else:
-        mt_all = gabung_mati_total(data, sales)
+        mt_all = gabung_mati_total(
+            data, sales,
+            (len(data), len(sales), str(data['TGL PENGIRIMAN'].max()),
+             str(sales['TGL'].max())))
 
         if mt_all.empty:
             st.info("Tidak ada transaksi berkerusakan MATI TOTAL pada data ini.")
@@ -3555,7 +3581,7 @@ TIER_BAWAAN = [
 GRADASI_TIER = ['#1f3864', '#2b4f8f', '#3f8ac9', '#17a3a3',
                 '#16a34a', '#e0b31f', '#e0921f', '#c9392f']
 KOL_BATAS = 'Batas Bawah (Rp)'
-KOL_HADIAH = 'Reward (Rp)'
+KOL_HADIAH = 'Budget Bundling (Rp)'
 
 
 def singkat_rp(v) -> str:
@@ -3665,11 +3691,11 @@ def hitung_tier_nota(nota_nilai: pd.Series, tingkat) -> pd.DataFrame:
 
 
 with tab_reward:
-    st.markdown("## Reward Nota Pelanggan")
+    st.markdown("## Budget Bundling per Nota")
     st.caption(
         "Menggolongkan setiap nota menurut nilainya, lalu menghitung berapa nota "
-        "per bulan di tiap tingkat dan berapa biaya reward yang timbul. "
-        "Rentang harga maupun nilai rewardnya bisa Anda atur sendiri."
+        "per bulan di tiap tingkat dan berapa budget bundling yang timbul. "
+        "Rentang harga maupun nilai budget bundlingnya bisa Anda atur sendiri."
     )
 
     if sales.empty:
@@ -3687,7 +3713,7 @@ with tab_reward:
                                   KOL_HADIAH: [float(r) for _, r in TIER_BAWAAN]})
         tingkat = None
 
-        with st.expander("⚙️ Atur rentang harga & reward (bisa diubah sendiri)",
+        with st.expander("⚙️ Atur rentang harga & budget bundling (bisa diubah sendiri)",
                          expanded=False):
             st.caption(
                 "Isi **batas bawah** tiap tingkat. Batas atasnya terbentuk "
@@ -3738,7 +3764,7 @@ with tab_reward:
                              "masuk tingkat tersebut."),
                     KOL_HADIAH: st.column_config.NumberColumn(
                         KOL_HADIAH, min_value=0, step=5_000, format="%d",
-                        help="Reward yang diberikan untuk satu nota di "
+                        help="Budget bundling yang diberikan untuk satu nota di "
                              "tingkat ini."),
                 })
 
@@ -3759,7 +3785,7 @@ with tab_reward:
                 'Dari (termasuk)': rp(t[1], singkat=False),
                 'Sampai (tidak termasuk)': ('tanpa batas' if t[2] is None
                                             else rp(t[2], singkat=False)),
-                'Reward per Nota': rp(t[3], singkat=False),
+                'Budget Bundling per Nota': rp(t[3], singkat=False),
             } for t in tingkat])
             st.dataframe(pratinjau, use_container_width=True, hide_index=True,
                          key='rw_pratinjau')
@@ -3769,7 +3795,7 @@ with tab_reward:
                 data=json.dumps(
                     [{KOL_BATAS: t[1], KOL_HADIAH: t[3]} for t in tingkat],
                     indent=2).encode('utf-8'),
-                file_name="aturan_reward_nota.json", mime="application/json",
+                file_name="aturan_budget_bundling.json", mime="application/json",
                 key='rw_simpan')
             st.caption(
                 "Batas bawah **termasuk**, batas atas **tidak termasuk**. "
@@ -3819,15 +3845,15 @@ with tab_reward:
             {'label': 'Jumlah Nota', 'value': nfid(n_nota),
              'sub': 'sesuai filter aktif',
              'grad': 'linear-gradient(135deg,#3b5bfd,#5a72ff)'},
-            {'label': 'Total Reward', 'value': rp(total_reward),
+            {'label': 'Total Budget Bundling', 'value': rp(total_reward),
              'sub': f"rata-rata {rp(total_reward / n_nota if n_nota else 0)}/nota",
              'grad': 'linear-gradient(135deg,#7c3aed,#a855f7)'},
-            {'label': 'Reward ÷ Omzet', 'value': pctid(rasio),
+            {'label': 'Budget Bundling ÷ Omzet', 'value': pctid(rasio),
              'sub': f"dari omzet {rp(total_omzet)}", 'grad': warna_rasio},
             {'label': 'Laba Kotor', 'value': rp(total_laba),
              'sub': f"margin {pctid(margin_sebelum)}",
              'grad': 'linear-gradient(135deg,#16a34a,#22c55e)'},
-            {'label': 'Laba Setelah Reward', 'value': rp(laba_setelah),
+            {'label': 'Laba Setelah Budget Bundling', 'value': rp(laba_setelah),
              'sub': f"margin {pctid(margin_setelah)}",
              'grad': 'linear-gradient(135deg,#0f8a82,#17a3a3)'},
             {'label': 'Beban Margin', 'value': pctid(margin_sebelum - margin_setelah),
@@ -3839,7 +3865,7 @@ with tab_reward:
         # =====================================================================
         # JUMLAH NOTA PER BULAN
         # =====================================================================
-        st.markdown("#### Jumlah Nota per Bulan menurut Tingkat Reward")
+        st.markdown("#### Jumlah Nota per Bulan menurut Tingkat Budget Bundling")
 
         th_opts_r = sorted(int(t) for t in nt['TAHUN_N'].dropna().unique())
         if f_tahun != 'Semua Tahun':
@@ -3867,15 +3893,15 @@ with tab_reward:
                              hovertemplate=('%{x}<br>' + lbl +
                                             ': %{y:,.0f} nota<extra></extra>'))
             figr.add_trace(go.Scatter(
-                x=nama_bl, y=rew_bl.values, name='Biaya reward', yaxis='y2',
+                x=nama_bl, y=rew_bl.values, name='Budget bundling', yaxis='y2',
                 mode='lines+markers', line=dict(color='#c9392f', width=3, dash='dot'),
                 marker=dict(size=8),
-                hovertemplate='%{x}<br>Reward: Rp %{y:,.0f}<extra></extra>'))
+                hovertemplate='%{x}<br>Budget bundling: Rp %{y:,.0f}<extra></extra>'))
             figr.update_layout(
                 barmode='stack', height=460,
                 margin=dict(l=10, r=10, t=30, b=10),
                 yaxis=dict(title='Jumlah nota'),
-                yaxis2=dict(title='Biaya reward (Rp)', overlaying='y', side='right',
+                yaxis2=dict(title='Budget bundling (Rp)', overlaying='y', side='right',
                             showgrid=False),
                 legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0,
                             font=dict(size=10)),
@@ -3886,26 +3912,26 @@ with tab_reward:
             tabel_bl.index = nama_bl
             tabel_bl.index.name = 'Bulan'
             tabel_bl['TOTAL NOTA'] = tabel_bl.sum(axis=1)
-            tabel_bl['BIAYA REWARD'] = rew_bl.values
+            tabel_bl['BIAYA BUDGET BUNDLING'] = rew_bl.values
             tabel_bl['OMZET'] = ntb.groupby('BULAN_N')['NILAI'].sum().reindex(piv.index).values
-            tabel_bl['REWARD ÷ OMZET'] = (tabel_bl['BIAYA REWARD'] /
+            tabel_bl['BUDGET ÷ OMZET'] = (tabel_bl['BIAYA BUDGET BUNDLING'] /
                                           tabel_bl['OMZET'] * 100)
             baris_total = tabel_bl.sum(numeric_only=True)
-            baris_total['REWARD ÷ OMZET'] = (baris_total['BIAYA REWARD'] /
+            baris_total['BUDGET ÷ OMZET'] = (baris_total['BIAYA BUDGET BUNDLING'] /
                                              baris_total['OMZET'] * 100)
             tampil = pd.concat([tabel_bl, baris_total.to_frame('TOTAL').T])
 
             st.dataframe(
                 tampil.style.format(
                     {**{c: '{:,.0f}' for c in LABEL_TIER},
-                     'TOTAL NOTA': '{:,.0f}', 'BIAYA REWARD': 'Rp {:,.0f}',
-                     'OMZET': 'Rp {:,.0f}', 'REWARD ÷ OMZET': '{:.2f}%'}),
+                     'TOTAL NOTA': '{:,.0f}', 'BIAYA BUDGET BUNDLING': 'Rp {:,.0f}',
+                     'OMZET': 'Rp {:,.0f}', 'BUDGET ÷ OMZET': '{:.2f}%'}),
                 use_container_width=True, key='rw_tabel_bulan')
 
             st.download_button(
                 "⬇️ Unduh rekap nota per bulan (CSV)",
                 data=tampil.to_csv().encode('utf-8-sig'),
-                file_name=f"reward_nota_per_bulan_{th_r}.csv", mime="text/csv",
+                file_name=f"budget_bundling_per_bulan_{th_r}.csv", mime="text/csv",
                 key='rw_unduh_bulan')
 
         # =====================================================================
@@ -3916,13 +3942,14 @@ with tab_reward:
 
         gt_r = nt.groupby('TIER', observed=False).agg(
             Nota=('NILAI', 'size'), Omzet=('NILAI', 'sum'),
-            Laba=('LABA', 'sum'), Reward=('REWARD', 'sum')).reindex(LABEL_TIER)
-        gt_r['Reward / Nota'] = [hadiah[l] for l in gt_r.index]
+            Laba=('LABA', 'sum'),
+            **{'Budget Bundling': ('REWARD', 'sum')}).reindex(LABEL_TIER)
+        gt_r['Budget Bundling / Nota'] = [hadiah[l] for l in gt_r.index]
         gt_r['% Nota'] = gt_r['Nota'] / n_nota * 100 if n_nota else 0.0
         gt_r['Rata-rata Nota'] = gt_r['Omzet'] / gt_r['Nota']
-        gt_r['Reward ÷ Nilai'] = gt_r['Reward'] / gt_r['Omzet'] * 100
-        gt_r['Laba Setelah Reward'] = gt_r['Laba'] - gt_r['Reward']
-        gt_r['Margin Setelah'] = gt_r['Laba Setelah Reward'] / gt_r['Omzet'] * 100
+        gt_r['Budget Bundling ÷ Nilai'] = gt_r['Budget Bundling'] / gt_r['Omzet'] * 100
+        gt_r['Laba Setelah Budget Bundling'] = gt_r['Laba'] - gt_r['Budget Bundling']
+        gt_r['Margin Setelah'] = gt_r['Laba Setelah Budget Bundling'] / gt_r['Omzet'] * 100
 
         rc1, rc2 = st.columns([1.15, 1])
         with rc1:
@@ -3943,9 +3970,9 @@ with tab_reward:
 
         with rc2:
             figp = go.Figure()
-            figp.add_bar(x=LABEL_TIER, y=gt_r['Reward ÷ Nilai'],
+            figp.add_bar(x=LABEL_TIER, y=gt_r['Budget Bundling ÷ Nilai'],
                          marker_color=[WARNA_TIER[l] for l in LABEL_TIER],
-                         text=[pctid(v) for v in gt_r['Reward ÷ Nilai'].fillna(0)],
+                         text=[pctid(v) for v in gt_r['Budget Bundling ÷ Nilai'].fillna(0)],
                          textposition='outside',
                          hovertemplate='%{x}<br>%{y:.1f}% dari nilai nota<extra></extra>')
             figp.add_hline(y=rasio, line_dash='dash', line_color='#6b7280',
@@ -3953,23 +3980,23 @@ with tab_reward:
                            annotation_position='top left')
             figp.update_layout(
                 height=380, margin=dict(l=10, r=10, t=40, b=10),
-                yaxis=dict(title='Reward sebagai % nilai nota'),
+                yaxis=dict(title='Budget bundling sebagai % nilai nota'),
                 showlegend=False, plot_bgcolor='#ffffff')
             figp.update_xaxes(tickangle=-25)
             st.plotly_chart(figp, use_container_width=True, key='rw_tier_beban')
             st.caption(
-                "Semakin kecil notanya, semakin besar porsi reward terhadap "
+                "Semakin kecil notanya, semakin besar porsi budget bundling terhadap "
                 "nilainya. Inilah bagian aturan yang paling menentukan biaya.")
 
         st.dataframe(
-            gt_r[['Nota', '% Nota', 'Rata-rata Nota', 'Omzet', 'Reward / Nota',
-                  'Reward', 'Reward ÷ Nilai', 'Laba', 'Laba Setelah Reward',
+            gt_r[['Nota', '% Nota', 'Rata-rata Nota', 'Omzet', 'Budget Bundling / Nota',
+                  'Budget Bundling', 'Budget Bundling ÷ Nilai', 'Laba', 'Laba Setelah Budget Bundling',
                   'Margin Setelah']].style.format({
                 'Nota': '{:,.0f}', '% Nota': '{:.1f}%',
                 'Rata-rata Nota': 'Rp {:,.0f}', 'Omzet': 'Rp {:,.0f}',
-                'Reward / Nota': 'Rp {:,.0f}', 'Reward': 'Rp {:,.0f}',
-                'Reward ÷ Nilai': '{:.1f}%', 'Laba': 'Rp {:,.0f}',
-                'Laba Setelah Reward': 'Rp {:,.0f}', 'Margin Setelah': '{:.1f}%'}),
+                'Budget Bundling / Nota': 'Rp {:,.0f}', 'Budget Bundling': 'Rp {:,.0f}',
+                'Budget Bundling ÷ Nilai': '{:.1f}%', 'Laba': 'Rp {:,.0f}',
+                'Laba Setelah Budget Bundling': 'Rp {:,.0f}', 'Margin Setelah': '{:.1f}%'}),
             use_container_width=True, key='rw_tabel_tier')
 
         # =====================================================================
@@ -3979,18 +4006,18 @@ with tab_reward:
         bc1, bc2 = st.columns([1, 1])
 
         with bc1:
-            st.markdown("#### Beban Reward per Cabang")
+            st.markdown("#### Beban Budget Bundling per Cabang")
             gcr = nt.groupby('CABANG').agg(
                 Nota=('NILAI', 'size'), Omzet=('NILAI', 'sum'),
-                Reward=('REWARD', 'sum'))
-            gcr['Reward ÷ Omzet'] = gcr['Reward'] / gcr['Omzet'] * 100
+                **{'Budget Bundling': ('REWARD', 'sum')})
+            gcr['Budget Bundling ÷ Omzet'] = gcr['Budget Bundling'] / gcr['Omzet'] * 100
             gcr['Rata-rata Nota'] = gcr['Omzet'] / gcr['Nota']
-            gcr = gcr.sort_values('Reward', ascending=False)
-            figcr = px.bar(gcr.reset_index(), x='Reward', y='CABANG',
-                           orientation='h', color='Reward ÷ Omzet',
+            gcr = gcr.sort_values('Budget Bundling', ascending=False)
+            figcr = px.bar(gcr.reset_index(), x='Budget Bundling', y='CABANG',
+                           orientation='h', color='Budget Bundling ÷ Omzet',
                            color_continuous_scale=[(0, '#16a34a'), (0.5, '#e0b31f'),
                                                    (1, '#c0392b')],
-                           text=gcr['Reward'].map(lambda v: rp(v)).values)
+                           text=gcr['Budget Bundling'].map(lambda v: rp(v)).values)
             figcr.update_layout(height=max(320, 22 * len(gcr) + 90),
                                 margin=dict(l=10, r=10, t=20, b=10),
                                 yaxis=dict(autorange='reversed', title=''),
@@ -4001,12 +4028,12 @@ with tab_reward:
             st.dataframe(
                 gcr.style.format({
                     'Nota': '{:,.0f}', 'Omzet': 'Rp {:,.0f}',
-                    'Reward': 'Rp {:,.0f}', 'Reward ÷ Omzet': '{:.2f}%',
+                    'Budget Bundling': 'Rp {:,.0f}', 'Budget Bundling ÷ Omzet': '{:.2f}%',
                     'Rata-rata Nota': 'Rp {:,.0f}'}),
                 use_container_width=True, height=320, key='rw_tabel_cabang')
 
         with bc2:
-            st.markdown("#### Pelanggan Penerima Reward Terbesar")
+            st.markdown("#### Pelanggan Penerima Budget Bundling Terbesar")
             # ID pelanggan generik dipakai bersama-sama untuk pelanggan umum /
             # walk-in, jadi tidak boleh diperlakukan sebagai satu orang.
             ID_UMUM = {'C.00000', 'MR909090', '', 'NAN', 'NONE'}
@@ -4016,13 +4043,14 @@ with tab_reward:
             n_umum = int(gp['UMUM'].sum())
             gpr = (gp[~gp['UMUM']].groupby('ID_PELANGGAN')
                    .agg(Nota=('NILAI', 'size'), Belanja=('NILAI', 'sum'),
-                        Reward=('REWARD', 'sum'), Nama=('PELANGGAN', 'first')))
-            gpr['Reward ÷ Belanja'] = gpr['Reward'] / gpr['Belanja'] * 100
-            gpr = gpr.sort_values('Reward', ascending=False)
+                        Nama=('PELANGGAN', 'first'),
+                        **{'Budget Bundling': ('REWARD', 'sum')}))
+            gpr['Budget Bundling ÷ Belanja'] = gpr['Budget Bundling'] / gpr['Belanja'] * 100
+            gpr = gpr.sort_values('Budget Bundling', ascending=False)
 
             n_pel = len(gpr)
             n_sering = int((gpr['Nota'] >= 10).sum())
-            rw_sering = float(gpr.loc[gpr['Nota'] >= 10, 'Reward'].sum())
+            rw_sering = float(gpr.loc[gpr['Nota'] >= 10, 'Budget Bundling'].sum())
             st.markdown(kpi_html([
                 {'label': 'Pelanggan Teridentifikasi', 'value': nfid(n_pel),
                  'sub': f"rata-rata {nfid(len(gp[~gp['UMUM']]) / n_pel if n_pel else 0, 1)} nota",
@@ -4036,10 +4064,10 @@ with tab_reward:
             ]), unsafe_allow_html=True)
             st.write("")
             st.dataframe(
-                gpr.head(50)[['Nama', 'Nota', 'Belanja', 'Reward',
-                              'Reward ÷ Belanja']].style.format({
+                gpr.head(50)[['Nama', 'Nota', 'Belanja', 'Budget Bundling',
+                              'Budget Bundling ÷ Belanja']].style.format({
                     'Nota': '{:,.0f}', 'Belanja': 'Rp {:,.0f}',
-                    'Reward': 'Rp {:,.0f}', 'Reward ÷ Belanja': '{:.1f}%'}),
+                    'Budget Bundling': 'Rp {:,.0f}', 'Budget Bundling ÷ Belanja': '{:.1f}%'}),
                 use_container_width=True, height=400, key='rw_tabel_pelanggan')
             st.caption(
                 "ID pelanggan umum/walk-in dikeluarkan dari daftar ini karena "
@@ -4050,7 +4078,7 @@ with tab_reward:
         # DETAIL NOTA
         # =====================================================================
         st.markdown("---")
-        with st.expander("🔎 Detail nota & rewardnya"):
+        with st.expander("🔎 Detail nota & budget bundlingnya"):
             pilih_tier = st.multiselect("Saring tingkat", LABEL_TIER,
                                         default=[], key='rw_pilih_tier')
             dr = nt if not pilih_tier else nt[nt['TIER'].isin(pilih_tier)]
@@ -4058,7 +4086,7 @@ with tab_reward:
                      'REWARD']].rename(columns={
                 'TGL': 'Tanggal', 'NO FAKTUR': 'No Faktur',
                 'PELANGGAN': 'Pelanggan', 'NILAI': 'Nilai Nota',
-                'TIER': 'Tingkat', 'REWARD': 'Reward'})
+                'TIER': 'Tingkat', 'REWARD': 'Budget Bundling'})
             qr = st.text_input("Cari faktur / pelanggan / cabang", key='rw_cari')
             if qr:
                 mr = dr.apply(lambda r: qr.upper() in ' '.join(
@@ -4067,12 +4095,12 @@ with tab_reward:
             dr = dr.sort_values('Nilai Nota', ascending=False)
             st.caption(f"{nfid(len(dr))} nota (ditampilkan maks 1.000).")
             st.dataframe(dr.head(1000).style.format({
-                'Nilai Nota': 'Rp {:,.0f}', 'Reward': 'Rp {:,.0f}'}),
+                'Nilai Nota': 'Rp {:,.0f}', 'Budget Bundling': 'Rp {:,.0f}'}),
                 use_container_width=True, height=380, key='rw_detail')
             st.download_button(
-                "⬇️ Unduh daftar nota + reward (CSV)",
+                "⬇️ Unduh daftar nota + budget bundling (CSV)",
                 data=dr.to_csv(index=False).encode('utf-8-sig'),
-                file_name="reward_nota_detail.csv", mime="text/csv",
+                file_name="budget_bundling_detail.csv", mime="text/csv",
                 key='rw_unduh_detail')
 
         # =====================================================================
@@ -4086,9 +4114,9 @@ with tab_reward:
         _pot_rw = potong_periode(_nt_pot, 'TGL')
         _metrik_rw = [
             ("Jumlah Nota", lambda d: len(d), lambda v: nfid(v), True),
-            ("Biaya Reward", lambda d: float(d['REWARD'].sum()), lambda v: rp(v), False),
+            ("Biaya Budget Bundling", lambda d: float(d['REWARD'].sum()), lambda v: rp(v), False),
             ("Omzet", lambda d: float(d['NILAI'].sum()), lambda v: rp(v), True),
-            ("Reward / Omzet", lambda d: (float(d['REWARD'].sum()) /
+            ("Budget Bundling / Omzet", lambda d: (float(d['REWARD'].sum()) /
                                           float(d['NILAI'].sum()) * 100)
              if float(d['NILAI'].sum()) else 0, lambda v: pctid(v, 2), False),
             ("Rata-rata Nilai Nota", lambda d: (float(d['NILAI'].sum()) / len(d))
@@ -4096,7 +4124,7 @@ with tab_reward:
         ]
         render_banding(_pot_rw, _metrik_rw, key_prefix='rw')
         st.caption(
-            "Pada baris **Biaya Reward** dan **Reward / Omzet**, warna hijau "
+            "Pada baris **Biaya Budget Bundling** dan **Budget Bundling / Omzet**, warna hijau "
             "berarti turun (baik untuk biaya) dan merah berarti naik.")
 
         # =====================================================================
@@ -4109,24 +4137,24 @@ with tab_reward:
         _kecil = gt_r.loc[LABEL_TIER[:_n_bawah]]
         _batas_kecil = tingkat[_n_bawah][1] if len(tingkat) > _n_bawah else None
         _porsi_kecil_nota = float(_kecil['Nota'].sum()) / n_nota * 100 if n_nota else 0
-        _porsi_kecil_rw = float(_kecil['Reward'].sum()) / total_reward * 100 if total_reward else 0
+        _porsi_kecil_rw = float(_kecil['Budget Bundling'].sum()) / total_reward * 100 if total_reward else 0
         _porsi_kecil_om = float(_kecil['Omzet'].sum()) / total_omzet * 100 if total_omzet else 0
         _it.append((
             'aksi', "Biaya terbesar justru datang dari nota terkecil",
             f"{_n_bawah} tingkat terbawah"
             + (f" (di bawah {rp(_batas_kecil, singkat=False)})" if _batas_kecil else "")
             + f" mencakup <b>{pctid(_porsi_kecil_nota)}</b> dari seluruh nota dan "
-            f"menyerap <b>{pctid(_porsi_kecil_rw)}</b> biaya reward, padahal hanya "
+            f"menyerap <b>{pctid(_porsi_kecil_rw)}</b> budget bundling, padahal hanya "
             f"menyumbang <b>{pctid(_porsi_kecil_om)}</b> omzet. Pada tingkat "
-            f"terbawah, reward setara <b>{pctid(float(gt_r['Reward ÷ Nilai'].iloc[0]))}</b> "
+            f"terbawah, budget bundling setara <b>{pctid(float(gt_r['Budget Bundling ÷ Nilai'].iloc[0]))}</b> "
             f"dari nilai notanya sendiri — bandingkan dengan tingkat tertinggi "
-            f"yang hanya <b>{pctid(float(gt_r['Reward ÷ Nilai'].iloc[-1]))}</b>. "
+            f"yang hanya <b>{pctid(float(gt_r['Budget Bundling ÷ Nilai'].iloc[-1]))}</b>. "
             f"Kalau biaya perlu ditekan, di sinilah pengaruhnya paling besar."))
 
         _jenis_r = 'aksi' if rasio >= 8 else ('perhatian' if rasio >= 5 else 'baik')
         _it.append((
             _jenis_r, "Beban terhadap margin",
-            f"Total reward <b>{rp(total_reward)}</b> setara <b>{pctid(rasio)}</b> "
+            f"Total budget bundling <b>{rp(total_reward)}</b> setara <b>{pctid(rasio)}</b> "
             f"dari omzet. Margin kotor turun dari <b>{pctid(margin_sebelum)}</b> "
             f"menjadi <b>{pctid(margin_setelah)}</b> — berkurang "
             f"<b>{pctid(margin_sebelum - margin_setelah)}</b> poin. Perlu dicatat: "
@@ -4139,24 +4167,24 @@ with tab_reward:
             _bl_lengkap = _bl_rata.iloc[:-1]
             _it.append((
                 'info', "Perkiraan biaya bulanan",
-                f"Rata-rata biaya reward per bulan (mengecualikan bulan berjalan "
+                f"Rata-rata budget bundling per bulan (mengecualikan bulan berjalan "
                 f"yang belum penuh): <b>{rp(float(_bl_lengkap.mean()))}</b>, "
                 f"dengan bulan tertinggi <b>{rp(float(_bl_lengkap.max()))}</b>. "
                 f"Untuk setahun penuh, anggaran yang perlu disiapkan sekitar "
                 f"<b>{rp(float(_bl_lengkap.mean()) * 12)}</b>."))
 
         if len(gcr) >= 2:
-            _g = gcr.sort_values('Reward ÷ Omzet')
+            _g = gcr.sort_values('Budget Bundling ÷ Omzet')
             _hi, _lo = _g.iloc[-1], _g.iloc[0]
             _it.append((
                 'perhatian', "Beban tidak merata antar cabang",
-                f"Cabang <b>{_g.index[-1]}</b> menanggung reward setara "
-                f"<b>{pctid(float(_hi['Reward ÷ Omzet']))}</b> dari omzetnya, "
+                f"Cabang <b>{_g.index[-1]}</b> menanggung budget bundling setara "
+                f"<b>{pctid(float(_hi['Budget Bundling ÷ Omzet']))}</b> dari omzetnya, "
                 f"sementara <b>{_g.index[0]}</b> hanya "
-                f"<b>{pctid(float(_lo['Reward ÷ Omzet']))}</b>. Penyebabnya bukan "
+                f"<b>{pctid(float(_lo['Budget Bundling ÷ Omzet']))}</b>. Penyebabnya bukan "
                 f"pemborosan, melainkan komposisi nota: cabang dengan rata-rata "
                 f"nota kecil ({rp(float(_hi['Rata-rata Nota']))} vs "
-                f"{rp(float(_lo['Rata-rata Nota']))}) otomatis membayar reward "
+                f"{rp(float(_lo['Rata-rata Nota']))}) otomatis membayar budget bundling "
                 f"lebih besar relatif terhadap omzet."))
 
         if n_umum:
@@ -4165,7 +4193,7 @@ with tab_reward:
                 f"<b>{nfid(n_umum)} nota</b> "
                 f"({pctid(n_umum / n_nota * 100 if n_nota else 0)}) memakai ID "
                 f"pelanggan umum/walk-in yang dipakai bersama-sama banyak orang. "
-                f"Reward untuk nota-nota ini tidak bisa ditelusuri ke pelanggan "
+                f"Budget bundling untuk nota-nota ini tidak bisa ditelusuri ke pelanggan "
                 f"tertentu, sehingga rawan disalahgunakan dan tidak bisa dipakai "
                 f"untuk program loyalitas. Mewajibkan pencatatan ID saat nota "
                 f"dibuat adalah perbaikan paling murah di sini."))
@@ -4174,7 +4202,7 @@ with tab_reward:
             _it.append((
                 'info', "Pelanggan berulang",
                 f"<b>{nfid(n_sering)} pelanggan</b> memiliki 10 nota atau lebih dan "
-                f"menyerap <b>{rp(rw_sering)}</b> reward "
+                f"menyerap <b>{rp(rw_sering)}</b> budget bundling "
                 f"({pctid(rw_sering / total_reward * 100 if total_reward else 0)} "
                 f"dari total). Sebagian besar kemungkinan adalah reseller atau "
                 f"pelanggan korporat, bukan konsumen akhir — layak diperiksa apakah "
@@ -4195,19 +4223,19 @@ with tab_reward:
         panel_analisa(_it)
 
         tombol_pdf(
-            "Reward Nota Pelanggan", _pot_rw, _metrik_rw,
+            "Budget Bundling per Nota", _pot_rw, _metrik_rw,
             temuan=[(j, ju, re.sub('<[^>]+>', '', isi)) for j, ju, isi in _it],
             kpis=[{'label': 'Jumlah Nota', 'value': nfid(n_nota),
                    'sub': 'sesuai filter', 'warna': _PN},
-                  {'label': 'Total Reward', 'value': rp(total_reward),
+                  {'label': 'Total Budget Bundling', 'value': rp(total_reward),
                    'sub': f"rata-rata {rp(total_reward / n_nota if n_nota else 0)}/nota",
                    'warna': _PR},
-                  {'label': 'Reward / Omzet', 'value': pctid(rasio),
+                  {'label': 'Budget Bundling / Omzet', 'value': pctid(rasio),
                    'sub': f"omzet {rp(total_omzet)}",
                    'warna': (_PR if rasio >= 8 else (_PA if rasio >= 5 else _PG))},
                   {'label': 'Laba Kotor', 'value': rp(total_laba),
                    'sub': f"margin {pctid(margin_sebelum)}", 'warna': _PG},
-                  {'label': 'Laba Setelah Reward', 'value': rp(laba_setelah),
+                  {'label': 'Laba Setelah Budget Bundling', 'value': rp(laba_setelah),
                    'sub': f"margin {pctid(margin_setelah)}", 'warna': _PN},
                   {'label': 'Beban Margin',
                    'value': pctid(margin_sebelum - margin_setelah),
@@ -4217,7 +4245,7 @@ with tab_reward:
                 "nilai berupa penjumlahan TOTAL HARGA seluruh barisnya. Setiap nota "
                 "digolongkan ke salah satu tingkat yang berlaku, dengan batas bawah "
                 "inklusif dan batas atas eksklusif. Rentang harga maupun nilai "
-                "reward tiap tingkat dapat diubah dari dashboard, dan seluruh angka "
+                "budget bundling tiap tingkat dapat diubah dari dashboard, dan seluruh angka "
                 "pada laporan ini mengikuti pengaturan yang sedang aktif. Ketentuan "
                 "yang dipakai: " +
                 "; ".join(f"{t[0]} = {rp(t[3], singkat=False)}" for t in tingkat) +
@@ -4225,7 +4253,7 @@ with tab_reward:
                 "per baris, sehingga laba kotor = TOTAL HARGA - HARGA BELI, belum "
                 "dipotong bagi hasil teknisi maupun biaya operasional."),
             ringkasan=(
-                f"{nfid(n_nota)} nota menimbulkan biaya reward {rp(total_reward)} "
+                f"{nfid(n_nota)} nota menimbulkan budget bundling {rp(total_reward)} "
                 f"({pctid(rasio)} dari omzet {rp(total_omzet)}). Margin kotor turun "
                 f"dari {pctid(margin_sebelum)} ke {pctid(margin_setelah)}."),
             key='rw')
@@ -4236,11 +4264,11 @@ with tab_reward:
                 rentang = (f"{rp(bawah, singkat=False)} ke atas" if atas is None
                            else f"{rp(bawah, singkat=False)} s/d di bawah "
                                 f"{rp(atas, singkat=False)}")
-                baris.append(f"- **{lbl}** — {rentang} → reward "
+                baris.append(f"- **{lbl}** — {rentang} → budget bundling "
                              f"**{rp(hdh, singkat=False)}**")
             st.write(
                 "**Ketentuan yang sedang dipakai:**\n\n" + "\n".join(baris) +
-                "\n\nUbah lewat **⚙️ Atur rentang harga & reward** di bagian atas "
+                "\n\nUbah lewat **⚙️ Atur rentang harga & budget bundling** di bagian atas "
                 "tab ini. Simpan hasilnya sebagai berkas `.json` agar bisa dimuat "
                 "kembali setelah aplikasi tidur.\n\n"
                 "**Aturan batas.** Batas bawah termasuk, batas atas tidak "

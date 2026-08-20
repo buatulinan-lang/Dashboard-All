@@ -188,8 +188,8 @@ SERVIS_TAK_DIPAKAI = [
     'ESTIMASI HARGA SERVICE', 'ESTIMASI GADGET SELESAI',
 ]
 JUAL_TAK_DIPAKAI = [
-    'Tanggal Pengiriman Pesanan', 'KATEGORI PELANGGAN', 'NAMA ADMIN',
-    'KODE BARANG', 'Nama Default Penjual Pelanggan Faktur Penjualan',
+    'Tanggal Pengiriman Pesanan', 'NAMA ADMIN', 'KODE BARANG',
+    'Nama Default Penjual Pelanggan Faktur Penjualan',
 ]
 
 
@@ -234,6 +234,40 @@ def load_data(file_bytes: bytes, source_kind: str) -> pd.DataFrame:
     full.attrs['total_raw_rows'] = total_raw
     full.attrs['total_unique'] = total_unique
     return full
+
+
+def rapikan_kat_pelanggan(v) -> str:
+    """Seragamkan penulisan kategori pelanggan.
+
+    Sumbernya bercampur huruf besar-kecil dan ada yang menyertakan tanggal
+    (mis. "CUST WALKIN TGL 25-6-23"). Tanpa diseragamkan, satu kategori yang
+    sama bisa terhitung sebagai beberapa kelompok berbeda.
+    """
+    s = str(v).strip().upper()
+    if s in ('', 'NAN', 'NONE', '-'):
+        return 'TIDAK ADA DATA'
+    if 'WALKIN' in s or 'WALK IN' in s:
+        return 'WALK IN'
+    if s.startswith('MEMBER'):
+        return s.replace('MEMBER  ', 'MEMBER ')
+    return s
+
+
+# Penamaan yang sebenarnya satu jenis pekerjaan. Digabung supaya porsinya
+# tidak terpecah dua. Bisa dimatikan dari dashboard bila memang dibedakan.
+SAMAKAN_PEKERJAAN = {
+    'SERVICE HANDPHONE': 'SERVICE HP',
+    'SERVICE HANDPHONE ': 'SERVICE HP',
+    'SERVICE HP ': 'SERVICE HP',
+    'PENJUALAN HANDPHONE': 'PENJUALAN HP',
+}
+
+
+def rapikan_pekerjaan(v) -> str:
+    s = str(v).strip().upper()
+    if s in ('', 'NAN', 'NONE', '-'):
+        return 'TIDAK ADA DATA'
+    return s
 
 
 SALES_REQUIRED = ['TGL FAKTUR', 'NO FAKTUR', 'KATEGORI BARANG', 'NAMA BARANG',
@@ -288,6 +322,19 @@ def load_sales(file_bytes: bytes, source_kind: str) -> pd.DataFrame:
                       .replace({'NAN': 'TIDAK ADA DATA', '': 'TIDAK ADA DATA'}))
     df['BARANG'] = df['NAMA BARANG'].astype(str).str.strip()
     df['BARANG_U'] = df['BARANG'].str.upper()
+
+    # Kategori pelanggan & jenis pekerjaan ditulis tidak seragam di sumbernya
+    # ("Member Reguler" vs "MEMBER REGULER", "CUST WALKIN TGL 25-6-23", dst),
+    # jadi diseragamkan di sini supaya tidak terhitung sebagai kelompok
+    # berbeda-beda pada dashboard.
+    if 'KATEGORI PELANGGAN' in df.columns:
+        df['PELANGGAN_KAT'] = df['KATEGORI PELANGGAN'].map(rapikan_kat_pelanggan)
+    else:
+        df['PELANGGAN_KAT'] = 'TIDAK ADA DATA'
+    if 'KATEGORI PENJUALAN' in df.columns:
+        df['PEKERJAAN'] = df['KATEGORI PENJUALAN'].map(rapikan_pekerjaan)
+    else:
+        df['PEKERJAAN'] = 'TIDAK ADA DATA'
     if 'YANG MENYERAHKAN/MENJUAL' in df.columns:
         df['PENJUAL'] = (df['YANG MENYERAHKAN/MENJUAL'].astype(str).str.strip()
                          .replace({'nan': 'TIDAK ADA DATA', '': 'TIDAK ADA DATA'}))
@@ -1259,6 +1306,7 @@ _SLIDE_LABELS = {
     "cancel": "Detail Cancel",
     "penjualan": "Penjualan (Modal & Laba)",
     "mlf": "Voucher Tiket MLF",
+    "budget_bundling": "Budget Bundling per Nota",
     "bagihasil": "Bagi Hasil Teknisi",
     "penutup": "Kesimpulan",
 }
@@ -1371,11 +1419,11 @@ if st.session_state.get("ppt_bytes"):
 # TABS
 # ---------------------------------------------------------------------------
 (tab_main, tab_pending, tab_done, tab_cancel, tab_mati, tab_jual, tab_mlf,
- tab_tek, tab_bundling, tab_reward) = st.tabs(
+ tab_tek, tab_bundling, tab_reward, tab_pelanggan) = st.tabs(
     ["📊 Dashboard Utama", "⚠️ Dashboard Pending", "✅ Dashboard Done",
      "🚫 Dashboard Cancel", "🔌 Mati Total", "💰 Penjualan", "🎫 Voucher MLF",
      "🧰 Omzet & Bagi Hasil Teknisi", "🎁 Bundling Aksesoris",
-     "🏆 Budget Bundling Nota"]
+     "🏆 Budget Bundling Nota", "👥 Kategori Pelanggan"]
 )
 
 # =============================================================================
@@ -4508,3 +4556,382 @@ with tab_reward:
                 f"karena datanya belum diperbarui."))
 
             panel_analisa(_pi)
+
+
+# =============================================================================
+# TAB 11: KATEGORI PELANGGAN × JENIS PEKERJAAN
+# =============================================================================
+with tab_pelanggan:
+    st.markdown("## Kategori Pelanggan & Jenis Pekerjaan")
+    st.caption(
+        "Siapa yang datang, pekerjaan apa yang mereka bawa, dan berapa "
+        "nilainya — supaya penawaran bisa diarahkan ke kelompok yang tepat."
+    )
+
+    if sales.empty:
+        st.warning(
+            "Dashboard ini membutuhkan data penjualan. Pastikan "
+            "`data/penjualan.csv.gz` ada di repo, atau upload lewat sidebar."
+        )
+    elif sales_f.empty:
+        st.warning("Tidak ada data penjualan untuk filter yang dipilih.")
+    elif 'PELANGGAN_KAT' not in sales_f.columns:
+        st.warning(
+            "Kolom **KATEGORI PELANGGAN** tidak ada pada data penjualan Anda. "
+            "Pastikan berkas `penjualan.csv.gz` dibuat ulang dengan alat "
+            "`update_data.py` versi terbaru."
+        )
+    else:
+        gabung_nama = st.checkbox(
+            "Gabungkan penamaan pekerjaan yang sebenarnya sama "
+            "(mis. SERVICE HANDPHONE → SERVICE HP)", value=True,
+            key='pl_gabung',
+            help="Di sumber data, satu jenis pekerjaan kadang ditulis dua "
+                 "macam. Kalau tidak digabung, porsinya terpecah dan terlihat "
+                 "lebih kecil dari kenyataan.")
+
+        sp = sales_f[['CABANG', 'NO FAKTUR', 'PELANGGAN_KAT', 'PEKERJAAN',
+                      'TOTAL HARGA', 'LABA', 'KATEGORI', 'TGL']].copy()
+        if gabung_nama:
+            sp['PEKERJAAN'] = sp['PEKERJAAN'].replace(SAMAKAN_PEKERJAAN)
+
+        # Satu nota = CABANG + NO FAKTUR. Kategori pelanggan dan jenis
+        # pekerjaan diambil dari baris pertama nota tersebut.
+        nota_p = sp.groupby(['CABANG', 'NO FAKTUR']).agg(
+            KAT=('PELANGGAN_KAT', 'first'),
+            KERJA=('PEKERJAAN', 'first'),
+            NILAI=('TOTAL HARGA', 'sum'),
+            LABA=('LABA', 'sum'),
+            TGL=('TGL', 'min')).reset_index()
+
+        n_nota_p = len(nota_p)
+        omzet_p = float(nota_p['NILAI'].sum())
+        n_kat = int(nota_p['KAT'].nunique())
+        n_kerja = int(nota_p['KERJA'].nunique())
+
+        gk = nota_p.groupby('KAT').agg(
+            Nota=('NILAI', 'size'), Omzet=('NILAI', 'sum'),
+            Laba=('LABA', 'sum')).sort_values('Omzet', ascending=False)
+        gk['% Nota'] = gk['Nota'] / n_nota_p * 100 if n_nota_p else 0.0
+        gk['% Omzet'] = gk['Omzet'] / omzet_p * 100 if omzet_p else 0.0
+        gk['Rata-rata Nota'] = gk['Omzet'] / gk['Nota']
+        gk['Margin'] = gk['Laba'] / gk['Omzet'] * 100
+
+        _top = gk.index[0] if len(gk) else '-'
+        _mahal = gk['Rata-rata Nota'].idxmax() if len(gk) else '-'
+        st.markdown(kpi_html([
+            {'label': 'Jumlah Nota', 'value': nfid(n_nota_p),
+             'sub': 'sesuai filter aktif',
+             'grad': 'linear-gradient(135deg,#3b5bfd,#5a72ff)'},
+            {'label': 'Kategori Pelanggan', 'value': nfid(n_kat),
+             'sub': f"{nfid(n_kerja)} jenis pekerjaan",
+             'grad': 'linear-gradient(135deg,#7c3aed,#a855f7)'},
+            {'label': 'Kategori Terbesar', 'value': str(_top)[:18],
+             'sub': f"{pctid(float(gk.loc[_top, '% Omzet']))} omzet" if len(gk) else '',
+             'grad': 'linear-gradient(135deg,#16a34a,#22c55e)'},
+            {'label': 'Nota Rata-rata Tertinggi', 'value': str(_mahal)[:18],
+             'sub': (rp(float(gk.loc[_mahal, 'Rata-rata Nota'])) if len(gk) else ''),
+             'grad': 'linear-gradient(135deg,#e0921f,#f0b13f)'},
+            {'label': 'Omzet', 'value': rp(omzet_p),
+             'sub': f"rata-rata {rp(omzet_p / n_nota_p if n_nota_p else 0)}/nota",
+             'grad': 'linear-gradient(135deg,#0f8a82,#17a3a3)'},
+            {'label': 'Margin Kotor', 'value': pctid(
+                float(gk['Laba'].sum()) / omzet_p * 100 if omzet_p else 0),
+             'sub': 'belum potong bagi hasil',
+             'grad': 'linear-gradient(135deg,#64748b,#94a3b8)'},
+        ]), unsafe_allow_html=True)
+        st.write("")
+
+        # ------------------------------------------------------------------
+        # KOMPOSISI KATEGORI PELANGGAN
+        # ------------------------------------------------------------------
+        st.markdown("#### Komposisi Kategori Pelanggan")
+        kk1, kk2 = st.columns([1, 1])
+        with kk1:
+            figk = go.Figure()
+            figk.add_bar(x=gk.index, y=gk['Nota'], name='Jumlah nota',
+                         marker_color='#3f8ac9',
+                         text=[f"{nfid(v)}<br>{pctid(p)}" for v, p
+                               in zip(gk['Nota'], gk['% Nota'])],
+                         textposition='outside',
+                         hovertemplate='%{x}<br>%{y:,.0f} nota<extra></extra>')
+            figk.update_layout(height=380, margin=dict(l=10, r=10, t=40, b=10),
+                               yaxis=dict(title='Jumlah nota'),
+                               showlegend=False, plot_bgcolor='#ffffff')
+            figk.update_xaxes(tickangle=-25)
+            st.plotly_chart(figk, use_container_width=True, key='pl_nota')
+        with kk2:
+            figm = go.Figure()
+            figm.add_bar(x=gk.index, y=gk['Rata-rata Nota'],
+                         marker_color='#e0921f',
+                         text=[rp(v) for v in gk['Rata-rata Nota']],
+                         textposition='outside',
+                         hovertemplate='%{x}<br>Rp %{y:,.0f}/nota<extra></extra>')
+            figm.add_hline(
+                y=(omzet_p / n_nota_p if n_nota_p else 0), line_dash='dash',
+                line_color='#6b7280',
+                annotation_text=f"rata-rata semua {rp(omzet_p / n_nota_p if n_nota_p else 0)}",
+                annotation_position='top left')
+            figm.update_layout(height=380, margin=dict(l=10, r=10, t=40, b=10),
+                               yaxis=dict(title='Rata-rata nilai nota (Rp)'),
+                               showlegend=False, plot_bgcolor='#ffffff')
+            figm.update_xaxes(tickangle=-25)
+            st.plotly_chart(figm, use_container_width=True, key='pl_rata')
+            st.caption(
+                "Jumlah nota menunjukkan siapa yang paling sering datang; "
+                "nilai rata-rata menunjukkan siapa yang paling bernilai. "
+                "Keduanya jarang menunjuk kelompok yang sama.")
+
+        st.dataframe(
+            gk[['Nota', '% Nota', 'Omzet', '% Omzet', 'Rata-rata Nota',
+                'Laba', 'Margin']].style.format({
+                'Nota': '{:,.0f}', '% Nota': '{:.1f}%', 'Omzet': 'Rp {:,.0f}',
+                '% Omzet': '{:.1f}%', 'Rata-rata Nota': 'Rp {:,.0f}',
+                'Laba': 'Rp {:,.0f}', 'Margin': '{:.1f}%'}),
+            use_container_width=True, key='pl_tabel_kat')
+
+        # ------------------------------------------------------------------
+        # SILANG: KATEGORI PELANGGAN × JENIS PEKERJAAN
+        # ------------------------------------------------------------------
+        st.markdown("---")
+        st.markdown("#### Jenis Pekerjaan pada Tiap Kategori Pelanggan")
+
+        ukuran = st.radio(
+            "Yang diukur", ['Jumlah nota', 'Omzet'], horizontal=True,
+            key='pl_ukuran')
+        # crosstab dipakai untuk hitungan, pivot_table untuk penjumlahan nilai —
+        # aggfunc='size' bersama values= berperilaku tidak menentu.
+        if ukuran == 'Jumlah nota':
+            sil = pd.crosstab(nota_p['KAT'], nota_p['KERJA'])
+        else:
+            sil = nota_p.pivot_table(index='KAT', columns='KERJA',
+                                     values='NILAI', aggfunc='sum').fillna(0)
+        sil = sil.loc[gk.index.intersection(sil.index)]
+        urut_kerja = list(sil.sum().sort_values(ascending=False).index)
+        sil = sil[urut_kerja]
+        _pembagi = sil.sum(axis=1).replace(0, float('nan'))
+        sil_pct = sil.div(_pembagi, axis=0) * 100
+
+        figs = go.Figure()
+        for i, kerja in enumerate(urut_kerja):
+            figs.add_bar(
+                x=sil_pct.index, y=sil_pct[kerja], name=str(kerja),
+                marker_color=PALETTE[i % len(PALETTE)],
+                hovertemplate=('%{x}<br>' + str(kerja) +
+                               ': %{y:.1f}%<extra></extra>'))
+        figs.update_layout(
+            barmode='stack', height=430, margin=dict(l=10, r=10, t=40, b=10),
+            yaxis=dict(title=f'Porsi {ukuran.lower()} (%)', range=[0, 100]),
+            legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0,
+                        font=dict(size=10)),
+            plot_bgcolor='#ffffff')
+        figs.update_xaxes(tickangle=-25)
+        st.plotly_chart(figs, use_container_width=True, key='pl_silang')
+        st.caption(
+            "Tiap batang berjumlah 100%, jadi yang dibandingkan adalah "
+            "*komposisi* pekerjaan di dalam kategori itu — bukan besarnya. "
+            "Kategori kecil pun terlihat jelas polanya.")
+
+        with st.expander("Lihat angka silang (kategori pelanggan × pekerjaan)"):
+            fmt = '{:,.0f}' if ukuran == 'Jumlah nota' else 'Rp {:,.0f}'
+            st.dataframe(
+                sil.style.format({c: fmt for c in sil.columns}),
+                use_container_width=True, key='pl_tabel_silang')
+            st.caption("Angka dalam persen (per baris):")
+            st.dataframe(
+                sil_pct.style.format({c: '{:.1f}%' for c in sil_pct.columns}),
+                use_container_width=True, key='pl_tabel_silang_pct')
+            st.download_button(
+                "⬇️ Unduh tabel silang (CSV)",
+                data=sil.to_csv().encode('utf-8-sig'),
+                file_name="kategori_pelanggan_x_pekerjaan.csv",
+                mime="text/csv", key='pl_unduh_silang')
+
+        # ------------------------------------------------------------------
+        # KERUSAKAN & KATEGORI BARANG PER KATEGORI PELANGGAN
+        # ------------------------------------------------------------------
+        st.markdown("---")
+        pk1, pk2 = st.columns([1, 1])
+        with pk1:
+            st.markdown("#### Telusuri Satu Kategori")
+            pilih_kat = st.selectbox(
+                "Kategori pelanggan", list(gk.index),
+                format_func=lambda x: str(x), key='pl_pilih_kat')
+            sub_p = nota_p[nota_p['KAT'] == pilih_kat]
+            gker = (sub_p.groupby('KERJA')
+                    .agg(Nota=('NILAI', 'size'), Omzet=('NILAI', 'sum'))
+                    .sort_values('Omzet', ascending=False))
+            gker['Rata-rata'] = gker['Omzet'] / gker['Nota']
+            gker['% Nota'] = gker['Nota'] / len(sub_p) * 100 if len(sub_p) else 0
+            st.dataframe(
+                gker.style.format({
+                    'Nota': '{:,.0f}', 'Omzet': 'Rp {:,.0f}',
+                    'Rata-rata': 'Rp {:,.0f}', '% Nota': '{:.1f}%'}),
+                use_container_width=True, height=320, key='pl_detail_kerja')
+
+        with pk2:
+            st.markdown("#### Kategori Barang yang Dibeli")
+            sb_p = sp[sp['PELANGGAN_KAT'] == pilih_kat]
+            gbar = (sb_p.groupby('KATEGORI')['TOTAL HARGA']
+                    .agg(['size', 'sum']).rename(
+                        columns={'size': 'Baris', 'sum': 'Omzet'})
+                    .sort_values('Omzet', ascending=False).head(10))
+            figb = px.bar(gbar.reset_index(), x='Omzet', y='KATEGORI',
+                          orientation='h',
+                          text=gbar['Omzet'].map(lambda v: rp(v)).values,
+                          color_discrete_sequence=['#6d3fbf'])
+            figb.update_layout(height=340, margin=dict(l=10, r=10, t=20, b=10),
+                               yaxis=dict(autorange='reversed', title=''),
+                               plot_bgcolor='#ffffff')
+            figb.update_traces(textposition='outside', cliponaxis=False)
+            st.plotly_chart(figb, use_container_width=True, key='pl_barang')
+
+        # ------------------------------------------------------------------
+        # PERBANDINGAN PERIODE
+        # ------------------------------------------------------------------
+        st.markdown("### 📊 Perbandingan Periode")
+        _sp_all = sales if f_cabang == 'Semua Cabang' else sales[sales['CABANG'] == f_cabang]
+        _np_all = _sp_all.groupby(['CABANG', 'NO FAKTUR']).agg(
+            KAT=('PELANGGAN_KAT', 'first'), NILAI=('TOTAL HARGA', 'sum'),
+            TGL=('TGL', 'min')).reset_index()
+        _pot_pl = potong_periode(_np_all, 'TGL')
+
+        def _porsi_kat(d, nama):
+            return (float((d['KAT'] == nama).sum()) / len(d) * 100) if len(d) else 0
+
+        _kat_utama = list(gk.index[:2])
+        _metrik_pl = [
+            ("Jumlah Nota", lambda d: len(d), lambda v: nfid(v), True),
+            ("Omzet", lambda d: float(d['NILAI'].sum()), lambda v: rp(v), True),
+            ("Rata-rata Nilai Nota",
+             lambda d: (float(d['NILAI'].sum()) / len(d)) if len(d) else 0,
+             lambda v: rp(v), True),
+            ("Jumlah Kategori", lambda d: int(d['KAT'].nunique()),
+             lambda v: nfid(v), True),
+        ]
+        for _nm in _kat_utama:
+            _metrik_pl.append(
+                (f"Porsi {str(_nm)[:16]}",
+                 (lambda n: (lambda d: _porsi_kat(d, n)))(_nm),
+                 lambda v: pctid(v), True))
+        render_banding(_pot_pl, _metrik_pl, key_prefix='pl')
+
+        # ------------------------------------------------------------------
+        # ANALISA
+        # ------------------------------------------------------------------
+        st.markdown("### 🧭 Analisa & Tindak Lanjut")
+        _ip = []
+
+        if len(gk) >= 2:
+            _t = gk.index[0]
+            _ip.append((
+                'info', "Kelompok yang menopang omzet",
+                f"<b>{_t}</b> menyumbang <b>{pctid(float(gk.loc[_t, '% Omzet']))}</b> "
+                f"omzet dari <b>{pctid(float(gk.loc[_t, '% Nota']))}</b> nota, "
+                f"dengan nilai rata-rata <b>{rp(float(gk.loc[_t, 'Rata-rata Nota']))}</b>. "
+                f"Ketergantungan pada satu kategori sebesar ini berarti perubahan "
+                f"perilaku kelompok tersebut langsung terasa di angka keseluruhan."))
+
+            _rt = gk['Rata-rata Nota']
+            _hi, _lo = _rt.idxmax(), _rt.idxmin()
+            if _hi != _lo:
+                _ip.append((
+                    'aksi', "Jarak nilai belanja antar kategori",
+                    f"<b>{_hi}</b> berbelanja rata-rata "
+                    f"<b>{rp(float(_rt.max()))}</b> per nota, sementara "
+                    f"<b>{_lo}</b> hanya <b>{rp(float(_rt.min()))}</b> — "
+                    f"selisih <b>{nfid(_rt.max() / _rt.min() if _rt.min() else 0, 1)} kali</b>. "
+                    f"Kalau {_lo} bisa didorong naik walau sedikit saja, "
+                    f"dampaknya besar karena jumlah notanya "
+                    f"{nfid(int(gk.loc[_lo, 'Nota']))}."))
+
+        if 'WALK IN' in gk.index or 'UMUM' in gk.index:
+            _nm = 'WALK IN' if 'WALK IN' in gk.index else 'UMUM'
+            _ip.append((
+                'perhatian', "Pelanggan tanpa keanggotaan",
+                f"<b>{_nm}</b> mencakup <b>{pctid(float(gk.loc[_nm, '% Nota']))}</b> "
+                f"nota senilai <b>{rp(float(gk.loc[_nm, 'Omzet']))}</b>. Kelompok ini "
+                f"tidak terikat program apa pun, sehingga paling mudah pindah ke "
+                f"pesaing. Sebaliknya, ini juga kolam terbesar untuk dikonversi "
+                f"menjadi member — dan konversinya bisa diukur dari pergeseran "
+                f"porsi kategori bulan ke bulan pada tabel perbandingan di atas."))
+
+        if len(sil_pct) >= 2 and len(urut_kerja) >= 2:
+            _kerja_utama = urut_kerja[0]
+            _var = sil_pct[_kerja_utama].dropna()
+            if len(_var) >= 2:
+                _ip.append((
+                    'info', f"Pola pekerjaan berbeda antar kategori",
+                    f"Untuk <b>{_kerja_utama}</b>, porsinya berkisar dari "
+                    f"<b>{pctid(float(_var.min()))}</b> pada <b>{_var.idxmin()}</b> "
+                    f"sampai <b>{pctid(float(_var.max()))}</b> pada "
+                    f"<b>{_var.idxmax()}</b>. Perbedaan sebesar ini menunjukkan "
+                    f"tiap kategori datang dengan kebutuhan yang berbeda, jadi "
+                    f"penawaran yang sama untuk semua orang akan meleset di "
+                    f"sebagian besar kasus."))
+
+        _ip.append((
+            'info', "Cara angka ini dihitung",
+            f"Satu nota = kombinasi <b>Cabang + Nomor Faktur</b>. Kategori "
+            f"pelanggan dan jenis pekerjaan diambil dari baris pertama nota "
+            f"tersebut, karena keduanya melekat pada nota, bukan pada barang. "
+            f"Penulisan kategori diseragamkan lebih dulu — di sumbernya "
+            f"\"Member Reguler\" dan \"MEMBER REGULER\" ditulis berbeda padahal "
+            f"sama, dan ada nilai seperti \"CUST WALKIN TGL 25-6-23\" yang "
+            f"diseragamkan menjadi <b>WALK IN</b>. Tanpa ini, satu kategori "
+            f"akan terhitung sebagai beberapa kelompok berbeda."
+            + (" Penamaan pekerjaan yang sebenarnya sama juga digabung "
+               "(SERVICE HANDPHONE dihitung sebagai SERVICE HP); matikan "
+               "centang di atas bila memang ingin dibedakan." if gabung_nama
+               else " Penamaan pekerjaan ditampilkan apa adanya sesuai sumber.")))
+
+        panel_analisa(_ip)
+
+        tombol_pdf(
+            "Kategori Pelanggan", _pot_pl, _metrik_pl,
+            temuan=[(j, ju, re.sub('<[^>]+>', '', isi)) for j, ju, isi in _ip],
+            kpis=[{'label': 'Jumlah Nota', 'value': nfid(n_nota_p),
+                   'sub': 'sesuai filter', 'warna': _PN},
+                  {'label': 'Kategori Pelanggan', 'value': nfid(n_kat),
+                   'sub': f"{nfid(n_kerja)} jenis pekerjaan", 'warna': _PN},
+                  {'label': 'Kategori Terbesar', 'value': str(_top)[:18],
+                   'sub': (f"{pctid(float(gk.loc[_top, '% Omzet']))} omzet"
+                           if len(gk) else ''), 'warna': _PG},
+                  {'label': 'Nota Rata-rata Tertinggi', 'value': str(_mahal)[:18],
+                   'sub': (rp(float(gk.loc[_mahal, 'Rata-rata Nota']))
+                           if len(gk) else ''), 'warna': _PA},
+                  {'label': 'Omzet', 'value': rp(omzet_p),
+                   'sub': f"rata-rata {rp(omzet_p / n_nota_p if n_nota_p else 0)}/nota",
+                   'warna': _PN}],
+            metodologi=(
+                "Sumbernya kolom KATEGORI PELANGGAN dan KATEGORI PENJUALAN pada "
+                "data faktur penjualan. Satu nota dihitung sebagai kombinasi "
+                "CABANG + NO FAKTUR, dengan kategori diambil dari baris pertama "
+                "nota. Penulisan kategori diseragamkan (huruf besar-kecil "
+                "disatukan; nilai bertanggal seperti 'CUST WALKIN TGL 25-6-23' "
+                "menjadi WALK IN). Tabel silang menampilkan porsi tiap jenis "
+                "pekerjaan di dalam kategori, sehingga tiap baris berjumlah "
+                "100% dan kategori kecil tetap terbaca polanya."),
+            ringkasan=(
+                f"{nfid(n_nota_p)} nota dari {nfid(n_kat)} kategori pelanggan "
+                f"dan {nfid(n_kerja)} jenis pekerjaan, total omzet {rp(omzet_p)}."),
+            key='pl')
+
+        with st.expander("ℹ️ Catatan perhitungan"):
+            st.write(
+                "**Sumber kolom.** `KATEGORI PELANGGAN` untuk kategori, "
+                "`KATEGORI PENJUALAN` untuk jenis pekerjaan. Keduanya hanya ada "
+                "pada data penjualan, tidak pada data servis — jadi tab ini "
+                "tidak terpengaruh filter status pengerjaan.\n\n"
+                "**Satu nota.** Kombinasi Cabang + Nomor Faktur, karena "
+                "penomoran faktur berjalan sendiri-sendiri di tiap cabang.\n\n"
+                "**Penyeragaman.** Huruf besar-kecil disatukan; segala bentuk "
+                "penulisan walk-in (termasuk yang menyertakan tanggal) "
+                "digabung menjadi `WALK IN`. Kalau ada kategori yang menurut "
+                "Anda seharusnya digabung tapi masih terpisah, beri tahu saya "
+                "nama persisnya.\n\n"
+                "**Nilai.** Memakai TOTAL HARGA. Laba kotor = TOTAL HARGA − "
+                "HARGA BELI, belum dipotong bagi hasil teknisi dan biaya "
+                "cabang, sehingga marginnya tampak tinggi pada pekerjaan yang "
+                "didominasi jasa."
+            )

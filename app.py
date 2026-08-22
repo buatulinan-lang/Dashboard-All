@@ -173,10 +173,26 @@ def _read_csv_gz_raw(file_bytes: bytes, buang=()) -> pd.DataFrame:
     Kolom pada `buang` tidak ikut dibaca sama sekali — bukan dibaca lalu
     dihapus. Bedanya besar untuk memori puncak: pandas tidak pernah membentuk
     kolom itu di memori.
+
+    Dua hal yang WAJIB dipertahankan di sini:
+
+    - `usecols` diberi **daftar nama kolom**, bukan fungsi. Bila diberi fungsi,
+      pandas versi baru bisa gagal dengan IndexError saat menyusun peringatan
+      tipe data campuran (`_concatenate_chunks`), karena daftar nama kolomnya
+      tidak lagi sejajar dengan nomor kolom.
+    - `low_memory=False` supaya berkas dibaca sekaligus, bukan per potongan.
+      Selain menghindari jalur bermasalah di atas, ini juga membuat tipe data
+      tiap kolom konsisten — kolom yang isinya campuran angka dan teks tidak
+      lagi terbaca berbeda-beda antar potongan.
     """
-    buang = set(buang)
+    buang = {str(b).strip().upper() for b in buang}
+    if not buang:
+        return pd.read_csv(io.BytesIO(file_bytes), compression='gzip',
+                           low_memory=False)
+    kepala = pd.read_csv(io.BytesIO(file_bytes), compression='gzip', nrows=0)
+    pakai = [c for c in kepala.columns if str(c).strip().upper() not in buang]
     return pd.read_csv(io.BytesIO(file_bytes), compression='gzip',
-                       usecols=(lambda c: c not in buang) if buang else None)
+                       usecols=pakai, low_memory=False)
 
 
 # Kolom yang tidak pernah ditampilkan atau dihitung dashboard. Dibuang saat

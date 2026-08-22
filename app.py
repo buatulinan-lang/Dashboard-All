@@ -236,6 +236,9 @@ def load_data(file_bytes: bytes, source_kind: str) -> pd.DataFrame:
     return full
 
 
+BELUM_PILAR = 'BELUM DIISI'
+
+
 def rapikan_kat_pelanggan(v) -> str:
     """Seragamkan penulisan kategori pelanggan.
 
@@ -335,6 +338,20 @@ def load_sales(file_bytes: bytes, source_kind: str) -> pd.DataFrame:
         df['PEKERJAAN'] = df['KATEGORI PENJUALAN'].map(rapikan_pekerjaan)
     else:
         df['PEKERJAAN'] = 'TIDAK ADA DATA'
+
+    # Kategori pilar. Kolomnya baru mulai diisi Agustus 2026, jadi baris lama
+    # sengaja ditandai BELUM DIISI — bukan dihilangkan — supaya terlihat berapa
+    # bagian omzet yang belum tergolongkan.
+    kol_pilar = next((c for c in df.columns
+                      if 'PILAR' in str(c).strip().upper()), None)
+    if kol_pilar:
+        df['PILAR'] = (df[kol_pilar].astype(str).str.strip().str.upper()
+                       .replace({'NAN': BELUM_PILAR, 'NONE': BELUM_PILAR,
+                                 '': BELUM_PILAR, '-': BELUM_PILAR}))
+        df['PILAR_ADA'] = df['PILAR'] != BELUM_PILAR
+    else:
+        df['PILAR'] = BELUM_PILAR
+        df['PILAR_ADA'] = False
     if 'YANG MENYERAHKAN/MENJUAL' in df.columns:
         df['PENJUAL'] = (df['YANG MENYERAHKAN/MENJUAL'].astype(str).str.strip()
                          .replace({'nan': 'TIDAK ADA DATA', '': 'TIDAK ADA DATA'}))
@@ -1307,6 +1324,7 @@ _SLIDE_LABELS = {
     "penjualan": "Penjualan (Modal & Laba)",
     "mlf": "Voucher Tiket MLF",
     "budget_bundling": "Budget Bundling per Nota",
+    "budget_bulan": "Budget Bundling per Bulan & Cabang",
     "bagihasil": "Bagi Hasil Teknisi",
     "penutup": "Kesimpulan",
 }
@@ -1419,11 +1437,11 @@ if st.session_state.get("ppt_bytes"):
 # TABS
 # ---------------------------------------------------------------------------
 (tab_main, tab_pending, tab_done, tab_cancel, tab_mati, tab_jual, tab_mlf,
- tab_tek, tab_bundling, tab_reward, tab_pelanggan) = st.tabs(
+ tab_tek, tab_bundling, tab_reward, tab_pelanggan, tab_pilar) = st.tabs(
     ["📊 Dashboard Utama", "⚠️ Dashboard Pending", "✅ Dashboard Done",
      "🚫 Dashboard Cancel", "🔌 Mati Total", "💰 Penjualan", "🎫 Voucher MLF",
      "🧰 Omzet & Bagi Hasil Teknisi", "🎁 Bundling Aksesoris",
-     "🏆 Budget Bundling Nota", "👥 Kategori Pelanggan"]
+     "🏆 Budget Bundling Nota", "👥 Kategori Pelanggan", "🏛️ Kategori Pilar"]
 )
 
 # =============================================================================
@@ -4935,3 +4953,413 @@ with tab_pelanggan:
                 "cabang, sehingga marginnya tampak tinggi pada pekerjaan yang "
                 "didominasi jasa."
             )
+
+
+# =============================================================================
+# TAB 12: KATEGORI PILAR
+# =============================================================================
+WARNA_PILAR = ['#1f3864', '#3f8ac9', '#16a34a', '#e0921f', '#7c3aed',
+               '#0f8a82', '#c9392f', '#a855f7']
+
+with tab_pilar:
+    st.markdown("## Rekap Kategori Pilar")
+    st.caption(
+        "Omzet, modal, laba, dan margin tiap pilar usaha — beserta porsinya "
+        "terhadap keseluruhan."
+    )
+
+    if sales.empty:
+        st.warning(
+            "Dashboard ini membutuhkan data penjualan. Pastikan "
+            "`data/penjualan.csv.gz` ada di repo, atau upload lewat sidebar."
+        )
+    elif 'PILAR' not in sales.columns or not bool(sales['PILAR_ADA'].any()):
+        st.warning(
+            "Kolom **KATEGORI PILAR** belum ada isinya pada data penjualan Anda. "
+            "Kolom ini baru muncul pada hasil export terbaru — gabungkan ulang "
+            "data penjualan memakai berkas export yang memuat kolom tersebut."
+        )
+    elif sales_f.empty:
+        st.warning("Tidak ada data penjualan untuk filter yang dipilih.")
+    else:
+        sp = sales_f
+        n_baris = len(sp)
+        terisi = int(sp['PILAR_ADA'].sum())
+        pct_terisi = terisi / n_baris * 100 if n_baris else 0
+        omzet_semua = float(sp['TOTAL HARGA'].sum())
+
+        hanya_terisi = st.checkbox(
+            "Hitung hanya baris yang pilarnya sudah diisi", value=True,
+            key='pl2_hanya',
+            help="Kolom pilar baru mulai diisi belakangan. Baris lama yang "
+                 "kosong akan menumpuk jadi satu kelompok besar dan menutupi "
+                 "perbandingan antar pilar kalau ikut dihitung.")
+        d = sp[sp['PILAR_ADA']] if hanya_terisi else sp
+
+        if d.empty:
+            st.warning("Tidak ada baris berpilar pada filter ini.")
+        else:
+            omzet = float(d['TOTAL HARGA'].sum())
+            modal = float(d['MODAL'].sum())
+            laba = float(d['LABA'].sum())
+            margin = (laba / omzet * 100) if omzet else 0
+            n_nota = d.groupby(['CABANG', 'NO FAKTUR']).ngroups
+            qty = float(d['QTY'].sum())
+            n_pilar = int(d['PILAR'].nunique())
+
+            warna_isi = ('linear-gradient(135deg,#16a34a,#22c55e)' if pct_terisi >= 90
+                         else ('linear-gradient(135deg,#f59e0b,#fbbf24)'
+                               if pct_terisi >= 60
+                               else 'linear-gradient(135deg,#dc2626,#ef4444)'))
+            st.markdown(kpi_html([
+                {'label': 'Omzet', 'value': rp(omzet),
+                 'sub': f"{nfid(n_nota)} nota · {nfid(qty)} unit",
+                 'grad': 'linear-gradient(135deg,#3b5bfd,#5a72ff)'},
+                {'label': 'Modal', 'value': rp(modal),
+                 'sub': f"{pctid(modal / omzet * 100 if omzet else 0)} dari omzet",
+                 'grad': 'linear-gradient(135deg,#dc2626,#ef4444)'},
+                {'label': 'Laba Kotor', 'value': rp(laba),
+                 'sub': f"margin {pctid(margin)}",
+                 'grad': 'linear-gradient(135deg,#16a34a,#22c55e)'},
+                {'label': 'Jumlah Pilar', 'value': nfid(n_pilar),
+                 'sub': 'pilar dengan transaksi',
+                 'grad': 'linear-gradient(135deg,#7c3aed,#a855f7)'},
+                {'label': 'Rata-rata / Nota', 'value': rp(omzet / n_nota if n_nota else 0),
+                 'sub': f"laba {rp(laba / n_nota if n_nota else 0)}/nota",
+                 'grad': 'linear-gradient(135deg,#0f8a82,#17a3a3)'},
+                {'label': 'Kolom Pilar Terisi', 'value': pctid(pct_terisi),
+                 'sub': f"{nfid(terisi)} dari {nfid(n_baris)} baris",
+                 'grad': warna_isi},
+            ]), unsafe_allow_html=True)
+            st.write("")
+
+            if pct_terisi < 95:
+                st.info(
+                    f"ℹ️ Kolom pilar baru terisi **{pctid(pct_terisi)}** pada "
+                    f"periode ini. Omzet yang belum tergolongkan: "
+                    f"**{rp(omzet_semua - omzet)}**. Angka di bawah hanya "
+                    f"mewakili bagian yang sudah diisi, jadi belum bisa dibaca "
+                    f"sebagai gambaran seluruh usaha."
+                )
+
+            # ---------------- rekap per pilar ----------------
+            g = d.groupby('PILAR').agg(
+                Baris=('TOTAL HARGA', 'size'), Qty=('QTY', 'sum'),
+                Omzet=('TOTAL HARGA', 'sum'), Modal=('MODAL', 'sum'),
+                Laba=('LABA', 'sum')).sort_values('Omzet', ascending=False)
+            # Nota unik per pilar = pasangan CABANG + NO FAKTUR yang berbeda.
+            g['Nota'] = (d.drop_duplicates(subset=['PILAR', 'CABANG', 'NO FAKTUR'])
+                         .groupby('PILAR').size().reindex(g.index)
+                         .fillna(0).astype(int))
+            g['% Omzet'] = g['Omzet'] / omzet * 100 if omzet else 0
+            g['% Laba'] = g['Laba'] / laba * 100 if laba else 0
+            g['Margin'] = g['Laba'] / g['Omzet'] * 100
+            g['Rata-rata / Nota'] = g['Omzet'] / g['Nota']
+
+            warna_map = {p: WARNA_PILAR[i % len(WARNA_PILAR)]
+                         for i, p in enumerate(g.index)}
+
+            c1, c2 = st.columns([1.25, 1])
+            with c1:
+                st.markdown("#### Omzet, Modal & Laba per Pilar")
+                figp = go.Figure()
+                figp.add_bar(x=g.index, y=g['Modal'], name='Modal',
+                             marker_color='#c0392b',
+                             hovertemplate='%{x}<br>Modal: Rp %{y:,.0f}<extra></extra>')
+                figp.add_bar(x=g.index, y=g['Laba'], name='Laba kotor',
+                             marker_color='#16a34a',
+                             text=[rp(v) for v in g['Omzet']],
+                             textposition='outside',
+                             hovertemplate='%{x}<br>Laba: Rp %{y:,.0f}<extra></extra>')
+                figp.update_layout(
+                    barmode='stack', height=420,
+                    margin=dict(l=10, r=10, t=40, b=10),
+                    yaxis=dict(title='Rupiah'),
+                    legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0),
+                    plot_bgcolor='#ffffff')
+                figp.update_xaxes(tickangle=-20)
+                st.plotly_chart(figp, use_container_width=True, key='pl2_bar')
+                st.caption("Tinggi seluruh batang = omzet; bagian merah adalah "
+                           "modal, bagian hijau adalah laba kotornya.")
+
+            with c2:
+                st.markdown("#### Porsi Omzet")
+                figd = px.pie(
+                    names=[f"{p} — {pctid(v)}" for p, v in
+                           zip(g.index, g['% Omzet'])],
+                    values=g['Omzet'], hole=0.55,
+                    color_discrete_sequence=[warna_map[p] for p in g.index])
+                figd.update_traces(textinfo='none')
+                figd.update_layout(height=420, margin=dict(l=5, r=5, t=20, b=5),
+                                   legend=dict(font=dict(size=10)))
+                st.plotly_chart(figd, use_container_width=True, key='pl2_pie')
+
+            st.markdown("#### Rekap Lengkap per Pilar")
+            tampil = g[['Nota', 'Baris', 'Qty', 'Omzet', '% Omzet', 'Modal',
+                        'Laba', '% Laba', 'Margin', 'Rata-rata / Nota']]
+            st.dataframe(
+                tampil.style.format({
+                    'Nota': '{:,.0f}', 'Baris': '{:,.0f}', 'Qty': '{:,.0f}',
+                    'Omzet': 'Rp {:,.0f}', '% Omzet': '{:.1f}%',
+                    'Modal': 'Rp {:,.0f}', 'Laba': 'Rp {:,.0f}',
+                    '% Laba': '{:.1f}%', 'Margin': '{:.1f}%',
+                    'Rata-rata / Nota': 'Rp {:,.0f}'}),
+                use_container_width=True, key='pl2_tabel')
+            st.download_button(
+                "⬇️ Unduh rekap pilar (CSV)",
+                data=tampil.reset_index().to_csv(index=False).encode('utf-8-sig'),
+                file_name=f"rekap_kategori_pilar_{f_tahun}.csv",
+                mime="text/csv", key='pl2_unduh')
+
+            # ---------------- margin & tren ----------------
+            st.markdown("---")
+            m1, m2 = st.columns([1, 1])
+            with m1:
+                st.markdown("#### Margin per Pilar")
+                gm = g.sort_values('Margin', ascending=False)
+                figm = px.bar(
+                    gm.reset_index(), x='Margin', y='PILAR', orientation='h',
+                    text=[pctid(v) for v in gm['Margin']],
+                    color='Margin',
+                    color_continuous_scale=[(0, '#c0392b'), (0.5, '#e0b31f'),
+                                            (1, '#16a34a')])
+                figm.update_layout(
+                    height=max(300, 40 * len(gm) + 80),
+                    margin=dict(l=10, r=10, t=20, b=10),
+                    yaxis=dict(autorange='reversed', title=''),
+                    coloraxis_showscale=False, plot_bgcolor='#ffffff')
+                figm.update_traces(textposition='outside', cliponaxis=False)
+                st.plotly_chart(figm, use_container_width=True, key='pl2_margin')
+                st.caption(
+                    "Margin di sini adalah laba kotor (omzet − harga beli), "
+                    "belum dipotong bagi hasil teknisi dan biaya cabang. Pilar "
+                    "yang isinya jasa akan tampak tinggi karena baris jasa "
+                    "hampir tidak punya harga beli.")
+
+            with m2:
+                st.markdown("#### Tren Bulanan per Pilar")
+                dt = d.dropna(subset=['TGL'])
+                if dt.empty:
+                    st.caption("Tanggal faktur tidak terbaca.")
+                else:
+                    piv = dt.pivot_table(index=dt['TGL'].dt.to_period('M'),
+                                         columns='PILAR', values='TOTAL HARGA',
+                                         aggfunc='sum').fillna(0)
+                    piv = piv.reindex(columns=[c for c in g.index if c in piv.columns])
+                    figt = go.Figure()
+                    for p in piv.columns:
+                        figt.add_bar(x=[str(i) for i in piv.index], y=piv[p],
+                                     name=str(p), marker_color=warna_map[p],
+                                     hovertemplate=('%{x}<br>' + str(p) +
+                                                    ': Rp %{y:,.0f}<extra></extra>'))
+                    figt.update_layout(
+                        barmode='stack',
+                        height=max(300, 40 * len(g) + 80),
+                        margin=dict(l=10, r=10, t=20, b=10),
+                        yaxis=dict(title='Omzet (Rp)'),
+                        legend=dict(orientation='h', yanchor='bottom', y=1.02,
+                                    x=0, font=dict(size=9)),
+                        plot_bgcolor='#ffffff')
+                    st.plotly_chart(figt, use_container_width=True, key='pl2_tren')
+
+            # ---------------- per cabang ----------------
+            st.markdown("---")
+            st.markdown("#### Pilar per Cabang")
+            ukur = st.radio("Yang ditampilkan", ['Omzet', 'Laba'],
+                            horizontal=True, key='pl2_ukur')
+            kol = 'TOTAL HARGA' if ukur == 'Omzet' else 'LABA'
+            pc = d.pivot_table(index='CABANG', columns='PILAR', values=kol,
+                               aggfunc='sum').fillna(0)
+            pc = pc.reindex(columns=[c for c in g.index if c in pc.columns])
+            pc['TOTAL'] = pc.sum(axis=1)
+            pc = pc.sort_values('TOTAL', ascending=False)
+            st.dataframe(
+                pc.style.format({c: 'Rp {:,.0f}' for c in pc.columns}),
+                use_container_width=True, height=420, key='pl2_cabang')
+            st.download_button(
+                "⬇️ Unduh pilar per cabang (CSV)",
+                data=pc.to_csv().encode('utf-8-sig'),
+                file_name=f"pilar_per_cabang_{f_tahun}.csv", mime="text/csv",
+                key='pl2_unduh_cabang')
+
+            # ---------------- keterisian ----------------
+            with st.expander("🔎 Keterisian kolom pilar per cabang"):
+                gk2 = sp.groupby('CABANG').agg(
+                    Baris=('PILAR_ADA', 'size'), Terisi=('PILAR_ADA', 'sum'))
+                gk2['% Terisi'] = gk2['Terisi'] / gk2['Baris'] * 100
+                gk2 = gk2.sort_values('% Terisi')
+                st.dataframe(
+                    gk2.style.format({'Baris': '{:,.0f}', 'Terisi': '{:,.0f}',
+                                      '% Terisi': '{:.1f}%'}),
+                    use_container_width=True, height=380, key='pl2_isi')
+                st.caption(
+                    "Cabang di baris atas paling sering melewatkan pengisian "
+                    "kolom pilar. Selama masih ada yang kosong, angka pilar "
+                    "belum bisa dipakai untuk menilai kinerja antar cabang.")
+
+            # ---------------- perbandingan periode ----------------
+            st.markdown("### 📊 Perbandingan Periode")
+            _sp_all = (sales if f_cabang == 'Semua Cabang'
+                       else sales[sales['CABANG'] == f_cabang])
+            _sp_all = _sp_all[_sp_all['PILAR_ADA']] if hanya_terisi else _sp_all
+            _pot_pi = potong_periode(_sp_all, 'TGL')
+            _pilar_utama = list(g.index[:2])
+            _metrik_pi = [
+                ("Omzet", lambda x: float(x['TOTAL HARGA'].sum()),
+                 lambda v: rp(v), True),
+                ("Laba Kotor", lambda x: float(x['LABA'].sum()),
+                 lambda v: rp(v), True),
+                ("Margin", lambda x: (float(x['LABA'].sum()) /
+                                      float(x['TOTAL HARGA'].sum()) * 100)
+                 if float(x['TOTAL HARGA'].sum()) else 0, lambda v: pctid(v), True),
+                ("Jumlah Nota",
+                 lambda x: x.groupby(['CABANG', 'NO FAKTUR']).ngroups,
+                 lambda v: nfid(v), True),
+            ]
+            for _p in _pilar_utama:
+                _metrik_pi.append(
+                    (f"Omzet {str(_p)[:16]}",
+                     (lambda nm: (lambda x: float(
+                         x.loc[x['PILAR'] == nm, 'TOTAL HARGA'].sum())))(_p),
+                     lambda v: rp(v), True))
+            render_banding(_pot_pi, _metrik_pi, key_prefix='pl2')
+            st.caption(
+                "Perlu diingat: kolom pilar baru mulai diisi belakangan, jadi "
+                "perbandingan terhadap bulan atau tahun sebelumnya bisa "
+                "menyesatkan — bukan pilarnya yang tumbuh, melainkan "
+                "pencatatannya yang membaik.")
+
+            # ---------------- analisa ----------------
+            st.markdown("### 🧭 Analisa & Tindak Lanjut")
+            _ia = []
+
+            _t1 = g.index[0]
+            _ia.append((
+                'info', "Pilar penopang utama",
+                f"<b>{_t1}</b> menyumbang <b>{pctid(float(g.loc[_t1, '% Omzet']))}</b> "
+                f"omzet ({rp(float(g.loc[_t1, 'Omzet']))}) dan "
+                f"<b>{pctid(float(g.loc[_t1, '% Laba']))}</b> laba, dengan margin "
+                f"<b>{pctid(float(g.loc[_t1, 'Margin']))}</b>. "
+                + (f"Pilar berikutnya, <b>{g.index[1]}</b>, hanya "
+                   f"<b>{pctid(float(g.loc[g.index[1], '% Omzet']))}</b> omzet — "
+                   f"artinya usaha ini masih bertumpu pada satu pilar."
+                   if len(g) > 1 else "")))
+
+            if len(g) >= 2:
+                _mg = g[g['Omzet'] > 0]['Margin']
+                _hi, _lo = _mg.idxmax(), _mg.idxmin()
+                if _hi != _lo:
+                    _ia.append((
+                        'aksi', "Jarak margin antar pilar",
+                        f"<b>{_hi}</b> bermargin <b>{pctid(float(_mg.max()))}</b>, "
+                        f"sementara <b>{_lo}</b> hanya "
+                        f"<b>{pctid(float(_mg.min()))}</b> — selisih "
+                        f"<b>{pctid(float(_mg.max() - _mg.min()))}</b> poin. "
+                        f"Pilar bermargin rendah biasanya berupa penjualan barang "
+                        f"jadi (harga belinya tinggi), sedangkan yang tinggi "
+                        f"didominasi jasa. Kalau porsi omzet bergeser ke pilar "
+                        f"bermargin rendah, omzet bisa naik tapi labanya tidak "
+                        f"ikut naik — periksa ini sebelum menetapkan target."))
+
+                _porsi_o = g['% Omzet']
+                _porsi_l = g['% Laba']
+                _selisih = (_porsi_l - _porsi_o).sort_values()
+                if len(_selisih) and abs(float(_selisih.iloc[0])) > 3:
+                    _nm = _selisih.index[0]
+                    _ia.append((
+                        'perhatian', "Porsi omzet tidak sejalan dengan porsi laba",
+                        f"<b>{_nm}</b> mengambil "
+                        f"<b>{pctid(float(_porsi_o[_nm]))}</b> omzet tetapi hanya "
+                        f"menyumbang <b>{pctid(float(_porsi_l[_nm]))}</b> laba — "
+                        f"tertinggal <b>{pctid(abs(float(_selisih.iloc[0])))}</b> "
+                        f"poin. Pilar seperti ini menyibukkan cabang tanpa "
+                        f"memberi hasil sebanding. Layak ditinjau harganya, atau "
+                        f"diposisikan sebagai pintu masuk menuju pilar lain yang "
+                        f"lebih menguntungkan."))
+
+            if pct_terisi < 95:
+                _bolong = sp[~sp['PILAR_ADA']]
+                _cab_bolong = (_bolong.groupby('CABANG').size()
+                               .sort_values(ascending=False).head(3))
+                _ia.append((
+                    'aksi', "Pencatatan pilar belum lengkap",
+                    f"Baru <b>{pctid(pct_terisi)}</b> baris yang terisi pilarnya; "
+                    f"omzet senilai <b>{rp(omzet_semua - omzet)}</b> belum "
+                    f"tergolongkan. Terbanyak di "
+                    f"<b>{', '.join(f'{i} ({nfid(int(v))} baris)' for i, v in _cab_bolong.items())}</b>. "
+                    f"Selama masih bolong, angka pilar tidak bisa dipakai menilai "
+                    f"kinerja antar cabang — cabang yang rajin mengisi justru "
+                    f"akan terlihat 'lebih besar' semata karena datanya lengkap. "
+                    f"Melengkapi pengisian ini lebih mendesak daripada menafsirkan "
+                    f"angkanya."))
+
+            _ia.append((
+                'info', "Cara angka ini dihitung",
+                f"Sumbernya kolom <b>KATEGORI PILAR</b> pada data faktur "
+                f"penjualan. Omzet memakai TOTAL HARGA, modal memakai HARGA BELI "
+                f"yang di sumber ini <b>sudah berupa total per baris</b> (bukan "
+                f"harga satuan, jadi tidak dikalikan QTY lagi). Laba kotor = "
+                f"omzet − modal, belum dipotong bagi hasil teknisi maupun biaya "
+                f"cabang. Jumlah nota dihitung sebagai kombinasi Cabang + Nomor "
+                f"Faktur karena penomoran berjalan sendiri-sendiri di tiap cabang."))
+
+            panel_analisa(_ia)
+
+            tombol_pdf(
+                "Rekap Kategori Pilar", _pot_pi, _metrik_pi,
+                temuan=[(j, ju, re.sub('<[^>]+>', '', isi)) for j, ju, isi in _ia],
+                kpis=[{'label': 'Omzet', 'value': rp(omzet),
+                       'sub': f"{nfid(n_nota)} nota", 'warna': _PN},
+                      {'label': 'Modal', 'value': rp(modal),
+                       'sub': f"{pctid(modal / omzet * 100 if omzet else 0)} dari omzet",
+                       'warna': _PR},
+                      {'label': 'Laba Kotor', 'value': rp(laba),
+                       'sub': f"margin {pctid(margin)}", 'warna': _PG},
+                      {'label': 'Jumlah Pilar', 'value': nfid(n_pilar),
+                       'sub': 'pilar dengan transaksi', 'warna': _PN},
+                      {'label': 'Pilar Terbesar', 'value': str(_t1)[:18],
+                       'sub': f"{pctid(float(g.loc[_t1, '% Omzet']))} omzet",
+                       'warna': _PA},
+                      {'label': 'Kolom Pilar Terisi', 'value': pctid(pct_terisi),
+                       'sub': f"{nfid(terisi)} dari {nfid(n_baris)} baris",
+                       'warna': (_PG if pct_terisi >= 90 else
+                                 (_PA if pct_terisi >= 60 else _PR))}],
+                metodologi=(
+                    "Sumbernya kolom KATEGORI PILAR pada data faktur penjualan. "
+                    "Omzet memakai TOTAL HARGA; modal memakai HARGA BELI yang "
+                    "pada sumber ini sudah berupa total per baris, sehingga tidak "
+                    "dikalikan QTY lagi. Laba kotor = omzet - modal, belum "
+                    "dipotong bagi hasil teknisi maupun biaya operasional cabang. "
+                    "Satu nota dihitung sebagai kombinasi CABANG + NO FAKTUR. "
+                    f"Kolom pilar baru terisi {pctid(pct_terisi)} pada periode "
+                    "ini, dan baris yang kosong "
+                    + ("dikeluarkan dari perhitungan."
+                       if hanya_terisi else
+                       "ikut dihitung sebagai kelompok BELUM DIISI.")),
+                ringkasan=(
+                    f"Omzet {rp(omzet)} dari {nfid(n_pilar)} pilar dengan laba "
+                    f"kotor {rp(laba)} (margin {pctid(margin)}). Pilar terbesar "
+                    f"{_t1} menguasai {pctid(float(g.loc[_t1, '% Omzet']))} omzet."),
+                key='pl2')
+
+            with st.expander("ℹ️ Catatan perhitungan"):
+                st.write(
+                    "**Sumber.** Kolom `KATEGORI PILAR` pada data faktur "
+                    "penjualan. Kolom ini baru muncul pada hasil export "
+                    "terbaru.\n\n"
+                    "**Keterisian.** Kolomnya belum diisi pada seluruh baris. "
+                    "Secara bawaan dashboard hanya menghitung baris yang sudah "
+                    "terisi — hilangkan centang di atas kalau ingin melihat "
+                    "berapa besar bagian yang belum tergolongkan.\n\n"
+                    "**Modal.** `HARGA BELI` pada sumber ini sudah berupa total "
+                    "per baris, bukan harga satuan. Kalau dikalikan QTY lagi, "
+                    "modal jadi jauh lebih besar dari omzet dan marginnya "
+                    "menjadi minus — kesalahan yang mudah terjadi kalau kolom "
+                    "ini disalahartikan.\n\n"
+                    "**Laba.** Laba kotor = TOTAL HARGA − HARGA BELI. Baris jasa "
+                    "hampir tidak punya harga beli, sehingga pilar yang "
+                    "didominasi jasa akan tampak bermargin sangat tinggi. Ini "
+                    "belum dipotong bagi hasil teknisi dan biaya cabang.\n\n"
+                    "**Satu nota.** Kombinasi Cabang + Nomor Faktur, karena "
+                    "penomoran faktur berjalan sendiri-sendiri di tiap cabang."
+                )

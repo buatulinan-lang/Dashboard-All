@@ -5004,12 +5004,37 @@ with tab_pilar:
         pct_terisi = terisi / n_baris * 100 if n_baris else 0
         omzet_semua = float(sp['TOTAL HARGA'].sum())
 
-        hanya_terisi = st.checkbox(
-            "Hitung hanya baris yang pilarnya sudah diisi", value=True,
-            key='pl2_hanya',
-            help="Kolom pilar baru mulai diisi belakangan. Baris lama yang "
-                 "kosong akan menumpuk jadi satu kelompok besar dan menutupi "
+        # Pilihan dibuat berupa dua pilihan bernama, bukan centang, supaya
+        # jelas apa yang sedang dihitung. Ringkasan di bawahnya menampilkan
+        # kedua angka sekaligus, jadi pengaruh pilihan ini langsung terlihat
+        # tanpa harus bolak-balik menggantinya.
+        _omzet_isi = float(sp.loc[sp['PILAR_ADA'], 'TOTAL HARGA'].sum())
+        _omzet_kosong = omzet_semua - _omzet_isi
+        MODE_ISI = "Hanya yang pilarnya sudah diisi"
+        MODE_SEMUA = "Semua baris (termasuk yang belum diisi)"
+        mode = st.radio(
+            "Baris yang dihitung", [MODE_ISI, MODE_SEMUA], horizontal=True,
+            key='pl2_mode',
+            help="Kolom pilar baru mulai diisi belakangan. Baris yang belum "
+                 "diisi menumpuk jadi satu kelompok besar dan menutupi "
                  "perbandingan antar pilar kalau ikut dihitung.")
+        hanya_terisi = (mode == MODE_ISI)
+
+        st.markdown(
+            f"""<div style="background:#f7f9fd;border:1px solid #e3e7f0;
+                     border-radius:10px;padding:9px 13px;margin:2px 0 12px;
+                     font-size:12.5px;color:#1f3864;line-height:1.7">
+              <b>Sudah diisi:</b> {nfid(terisi)} baris · {rp(_omzet_isi)}
+              &nbsp;&nbsp;|&nbsp;&nbsp;
+              <b>Belum diisi:</b> {nfid(n_baris - terisi)} baris ·
+              {rp(_omzet_kosong)}
+              &nbsp;&nbsp;|&nbsp;&nbsp;
+              <b>Sedang dihitung:</b>
+              <span style="color:#7c3aed;font-weight:800">
+                {nfid(terisi if hanya_terisi else n_baris)} baris ·
+                {rp(_omzet_isi if hanya_terisi else omzet_semua)}</span>
+            </div>""", unsafe_allow_html=True)
+
         d = sp[sp['PILAR_ADA']] if hanya_terisi else sp
 
         if d.empty:
@@ -5072,8 +5097,12 @@ with tab_pilar:
             g['Margin'] = g['Laba'] / g['Omzet'] * 100
             g['Rata-rata / Nota'] = g['Omzet'] / g['Nota']
 
+            # "BELUM DIISI" diberi abu-abu supaya tidak terbaca sebagai salah
+            # satu pilar usaha — ia hanya penampung baris yang belum digolongkan.
+            _pil = [p for p in g.index if p != BELUM_PILAR]
             warna_map = {p: WARNA_PILAR[i % len(WARNA_PILAR)]
-                         for i, p in enumerate(g.index)}
+                         for i, p in enumerate(_pil)}
+            warna_map[BELUM_PILAR] = '#94a3b8'
 
             c1, c2 = st.columns([1.25, 1])
             with c1:

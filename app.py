@@ -253,6 +253,29 @@ def load_data(file_bytes: bytes, source_kind: str) -> pd.DataFrame:
 
 
 BELUM_PILAR = 'BELUM DIISI'
+TEKS_KOSONG = ['NAN', 'NONE', 'NAT', '<NA>', 'NULL', '', '-']
+
+
+def teks_seragam(s: pd.Series, kosong: str, *, besar: bool = True):
+    """Seragamkan kolom teks. Kembalikan (nilai, penanda_terisi).
+
+    Nilai yang hilang ditangkap lewat `isna()` LEBIH DULU, bukan lewat
+    pencocokan teks 'NAN'.
+
+    Alasannya penting: pada pandas versi lama, `astype(str)` mengubah sel
+    kosong menjadi teks 'nan', sehingga penggantian teks masih mempan. Pada
+    pandas versi baru (dtype string bawaan, seperti yang dipakai Streamlit
+    Cloud), sel kosong TETAP kosong setelah `astype(str)` — penggantian teks
+    tidak pernah kena, dan perbandingan `!= kosong` menghasilkan True. Akibatnya
+    seluruh baris kosong terhitung seolah-olah terisi. Persis inilah yang
+    membuat kolom pilar sempat terbaca 'terisi 100%'.
+    """
+    hilang = s.isna()
+    t = s.astype(str).str.strip()
+    if besar:
+        t = t.str.upper()
+    hilang = hilang | t.str.upper().isin(TEKS_KOSONG)
+    return t.where(~hilang, kosong).fillna(kosong), ~hilang
 
 
 def rapikan_kat_pelanggan(v) -> str:
@@ -263,7 +286,7 @@ def rapikan_kat_pelanggan(v) -> str:
     sama bisa terhitung sebagai beberapa kelompok berbeda.
     """
     s = str(v).strip().upper()
-    if s in ('', 'NAN', 'NONE', '-'):
+    if s in TEKS_KOSONG:
         return 'TIDAK ADA DATA'
     if 'WALKIN' in s or 'WALK IN' in s:
         return 'WALK IN'
@@ -284,7 +307,7 @@ SAMAKAN_PEKERJAAN = {
 
 def rapikan_pekerjaan(v) -> str:
     s = str(v).strip().upper()
-    if s in ('', 'NAN', 'NONE', '-'):
+    if s in TEKS_KOSONG:
         return 'TIDAK ADA DATA'
     return s
 
@@ -337,8 +360,7 @@ def load_sales(file_bytes: bytes, source_kind: str) -> pd.DataFrame:
     df['BULAN'] = df['TGL'].dt.month
     df['MODAL'] = df['HARGA BELI']
     df['LABA'] = df['TOTAL HARGA'] - df['MODAL']
-    df['KATEGORI'] = (df['KATEGORI BARANG'].astype(str).str.strip().str.upper()
-                      .replace({'NAN': 'TIDAK ADA DATA', '': 'TIDAK ADA DATA'}))
+    df['KATEGORI'], _ = teks_seragam(df['KATEGORI BARANG'], 'TIDAK ADA DATA')
     df['BARANG'] = df['NAMA BARANG'].astype(str).str.strip()
     df['BARANG_U'] = df['BARANG'].str.upper()
 
@@ -361,16 +383,13 @@ def load_sales(file_bytes: bytes, source_kind: str) -> pd.DataFrame:
     kol_pilar = next((c for c in df.columns
                       if 'PILAR' in str(c).strip().upper()), None)
     if kol_pilar:
-        df['PILAR'] = (df[kol_pilar].astype(str).str.strip().str.upper()
-                       .replace({'NAN': BELUM_PILAR, 'NONE': BELUM_PILAR,
-                                 '': BELUM_PILAR, '-': BELUM_PILAR}))
-        df['PILAR_ADA'] = df['PILAR'] != BELUM_PILAR
+        df['PILAR'], df['PILAR_ADA'] = teks_seragam(df[kol_pilar], BELUM_PILAR)
     else:
         df['PILAR'] = BELUM_PILAR
         df['PILAR_ADA'] = False
     if 'YANG MENYERAHKAN/MENJUAL' in df.columns:
-        df['PENJUAL'] = (df['YANG MENYERAHKAN/MENJUAL'].astype(str).str.strip()
-                         .replace({'nan': 'TIDAK ADA DATA', '': 'TIDAK ADA DATA'}))
+        df['PENJUAL'], _ = teks_seragam(df['YANG MENYERAHKAN/MENJUAL'],
+                                        'TIDAK ADA DATA', besar=False)
     else:
         df['PENJUAL'] = 'TIDAK ADA DATA'
 
@@ -379,9 +398,7 @@ def load_sales(file_bytes: bytes, source_kind: str) -> pd.DataFrame:
     fin = df['NAMA TEKNISI (FINAL)'] if 'NAMA TEKNISI (FINAL)' in df.columns else pd.Series(index=df.index, dtype=object)
     asli = df['NAMA TEKNISI'] if 'NAMA TEKNISI' in df.columns else pd.Series(index=df.index, dtype=object)
     tek = fin.fillna(asli)
-    df['TEKNISI'] = (tek.astype(str).str.strip().str.upper()
-                     .replace({'NAN': '', 'NONE': ''}))
-    df.loc[df['TEKNISI'] == '', 'TEKNISI'] = 'TIDAK ADA TEKNISI'
+    df['TEKNISI'], _ = teks_seragam(tek, 'TIDAK ADA TEKNISI')
 
     # Simpan kata kunci yang cocok saja. Tarifnya sengaja TIDAK dihitung di sini
     # supaya bisa diubah pengguna dari dashboard tanpa memuat ulang data.

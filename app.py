@@ -1470,11 +1470,13 @@ if st.session_state.get("ppt_bytes"):
 # TABS
 # ---------------------------------------------------------------------------
 (tab_main, tab_pending, tab_done, tab_cancel, tab_mati, tab_jual, tab_mlf,
- tab_tek, tab_bundling, tab_reward, tab_pelanggan, tab_pilar) = st.tabs(
+ tab_tek, tab_bundling, tab_reward, tab_pelanggan, tab_pilar,
+ tab_produktif) = st.tabs(
     ["📊 Dashboard Utama", "⚠️ Dashboard Pending", "✅ Dashboard Done",
      "🚫 Dashboard Cancel", "🔌 Mati Total", "💰 Penjualan", "🎫 Voucher MLF",
      "🧰 Omzet & Bagi Hasil Teknisi", "🎁 Bundling Aksesoris",
-     "🏆 Budget Bundling Nota", "👥 Kategori Pelanggan", "🏛️ Kategori Pilar"]
+     "🏆 Budget Bundling Nota", "👥 Kategori Pelanggan", "🏛️ Kategori Pilar",
+     "🥇 Produktivitas Cabang"]
 )
 
 # =============================================================================
@@ -5425,3 +5427,637 @@ with tab_pilar:
                     "**Satu nota.** Kombinasi Cabang + Nomor Faktur, karena "
                     "penomoran faktur berjalan sendiri-sendiri di tiap cabang."
                 )
+
+
+# =============================================================================
+# TAB 13: PRODUKTIVITAS CABANG (periode Samurai)
+# =============================================================================
+# Penomoran Samurai: satu Samurai = satu kuartal kalender. Acuannya
+# Januari–Maret 2026 = Samurai 37, dan itu cocok dengan laporan pekanan
+# perusahaan ("PEKAN 5 SAMURAI 39, 6 Agustus 2026" → Juli–September 2026 = 39).
+SAMURAI_ACUAN_TAHUN = 2026
+SAMURAI_ACUAN_NOMOR = 37          # Januari–Maret 2026
+
+
+def nomor_samurai(t: pd.Series) -> pd.Series:
+    kuartal = (t.dt.month - 1) // 3 + 1
+    return (SAMURAI_ACUAN_NOMOR + (t.dt.year - SAMURAI_ACUAN_TAHUN) * 4
+            + (kuartal - 1))
+
+
+def rentang_samurai(nomor: int):
+    """Kembalikan (tanggal_mulai, tanggal_akhir) untuk satu nomor Samurai."""
+    selisih = int(nomor) - SAMURAI_ACUAN_NOMOR
+    tahun = SAMURAI_ACUAN_TAHUN + selisih // 4
+    kuartal = selisih % 4 + 1
+    bulan_awal = (kuartal - 1) * 3 + 1
+    bulan_akhir = bulan_awal + 2
+    return (pd.Timestamp(tahun, bulan_awal, 1),
+            pd.Timestamp(tahun, bulan_akhir,
+                         calendar.monthrange(tahun, bulan_akhir)[1]))
+
+
+def label_samurai(nomor: int) -> str:
+    a, b = rentang_samurai(nomor)
+    return (f"Samurai {int(nomor)} · {BULAN_NAMES[a.month]}–"
+            f"{BULAN_NAMES[b.month]} {b.year}")
+
+
+KOL_TARGET_GP = 'Target Gross Profit (Rp)'
+
+# Target gross profit per cabang untuk SATU periode Samurai penuh (3 bulan).
+# Gross profit = omzet - modal = TOTAL HARGA - HARGA BELI pada faktur penjualan.
+#
+# Bahwa targetnya per Samurai (bukan per bulan) terlihat dari datanya sendiri:
+# pencapaian Samurai 37 = 79,8%, Samurai 38 = 79,3%, dan Samurai 39 = 82,7%
+# terhadap target berjalan. Kalau target ini dianggap bulanan, pencapaiannya
+# hanya sekitar 26% — jauh dari angka 81-86% yang tercatat pada laporan
+# pekanan perusahaan.
+TARGET_GP_AWAL = {
+    'KLENDER': 820_000_000, 'CEGER': 770_000_000, 'BINTARA': 850_000_000,
+    'RADJIMAN': 516_000_000, 'JATIMULYA': 710_000_000, 'DRAMAGA': 500_000_000,
+    'CONDET': 670_000_000, 'JATIBENING': 690_000_000, 'SAWANGAN': 640_000_000,
+    'WARBONG': 600_000_000, 'CINERE': 600_000_000, 'CIBINONG': 435_000_000,
+    'KARAWANG': 550_000_000, 'JATIWARINGIN': 410_000_000,
+    'CIKAMPEK': 450_000_000, 'CILANGKAP': 500_000_000, 'PEJATEN': 350_000_000,
+    'CIBUBUR': 250_000_000,
+}
+
+with tab_produktif:
+    st.markdown("## Produktivitas Cabang")
+    st.caption(
+        "Tiga ukuran per cabang dalam satu periode Samurai: ketuntasan gadget, "
+        "porsi omzet service, dan pencapaian target gross profit."
+    )
+
+    if data.empty:
+        st.warning("Data servis belum termuat.")
+    else:
+        _td = data['TGL PENGIRIMAN']
+        _sam_servis = nomor_samurai(_td).dropna()
+        _sam_ada = sorted({int(x) for x in _sam_servis.unique()})
+        if not _sam_ada:
+            st.warning("Tanggal pada data servis tidak terbaca.")
+        else:
+            k1, k2 = st.columns([1.5, 1])
+            with k1:
+                sam = st.selectbox(
+                    "Periode Samurai", _sam_ada, index=len(_sam_ada) - 1,
+                    format_func=label_samurai, key='pr_sam')
+            mulai_s, akhir_s = rentang_samurai(sam)
+
+            with k2:
+                sumber_svc = st.radio(
+                    "Sumber omzet service",
+                    ['Kategori Penjualan', 'Kategori Pilar'],
+                    horizontal=True, key='pr_sumber',
+                    help="Kategori Penjualan terisi hampir seluruh baris, "
+                         "sedangkan Kategori Pilar baru terisi sebagian kecil. "
+                         "Untuk membandingkan cabang, yang terisi penuh jauh "
+                         "lebih adil.")
+
+            # ---------------- data periode ----------------
+            ds = data[(_td >= mulai_s) & (_td <= akhir_s)]
+            ps = (sales[(sales['TGL'] >= mulai_s) & (sales['TGL'] <= akhir_s)]
+                  if not sales.empty else pd.DataFrame())
+
+            if ds.empty:
+                st.warning("Tidak ada transaksi servis pada periode ini.")
+            else:
+                tgl_akhir_data = min(pd.Timestamp(_td.max()), akhir_s)
+                hari_total = (akhir_s - mulai_s).days + 1
+                hari_jalan = max((tgl_akhir_data - mulai_s).days + 1, 0)
+                porsi_hari = hari_jalan / hari_total if hari_total else 0
+                belum_penuh = hari_jalan < hari_total
+
+                # ---------------- ukuran 1: gadget done ----------------
+                pr = pd.DataFrame(index=sorted(ds['CABANG'].dropna().unique()))
+                pr['Unit Masuk'] = ds.groupby('CABANG').size().reindex(pr.index).fillna(0)
+                pr['Done'] = (ds[ds['STATUS_BUCKET'] == 'DONE'].groupby('CABANG')
+                              .size().reindex(pr.index).fillna(0))
+                pr['Pending'] = (ds[ds['STATUS_BUCKET'] == 'PENDING'].groupby('CABANG')
+                                 .size().reindex(pr.index).fillna(0))
+                pr['Cancel'] = (ds[ds['STATUS_BUCKET'] == 'CANCEL'].groupby('CABANG')
+                                .size().reindex(pr.index).fillna(0))
+                pr['% Done'] = pr['Done'] / pr['Unit Masuk'] * 100
+
+                # ---------------- ukuran 2 & 3: omzet, service, GP ----------
+                if ps.empty:
+                    for k in ['Omzet', 'Omzet Service', '% Service', 'Gross Profit']:
+                        pr[k] = 0.0
+                else:
+                    if sumber_svc == 'Kategori Pilar':
+                        is_svc = ps['PILAR'] == 'SERVICE'
+                    else:
+                        is_svc = ps['PEKERJAAN'].astype(str).str.startswith('SERVICE')
+                    pr['Omzet'] = (ps.groupby('CABANG')['TOTAL HARGA'].sum()
+                                   .reindex(pr.index).fillna(0))
+                    pr['Omzet Service'] = (ps[is_svc].groupby('CABANG')['TOTAL HARGA']
+                                           .sum().reindex(pr.index).fillna(0))
+                    pr['% Service'] = pr['Omzet Service'] / pr['Omzet'] * 100
+                    pr['Gross Profit'] = (ps.groupby('CABANG')['LABA'].sum()
+                                          .reindex(pr.index).fillna(0))
+
+                # ---------------- target gross profit ----------------
+                with st.expander("🎯 Atur target gross profit per cabang",
+                                 expanded=False):
+                    st.caption(
+                        "Target berlaku untuk satu periode **Samurai penuh "
+                        "(3 bulan)**, dan sudah terisi sesuai ketetapan "
+                        "perusahaan. Ubah angkanya bila targetnya berganti; "
+                        "kosongkan (isi 0) bila suatu cabang memang belum "
+                        "punya target — kolom pencapaiannya akan menampilkan "
+                        "tanda hubung, bukan angka 0 yang menyesatkan."
+                    )
+                    berkas_gp = st.file_uploader(
+                        "Muat target yang pernah disimpan (.json)", type=['json'],
+                        key='pr_muat')
+                    if berkas_gp is not None:
+                        try:
+                            isi = json.loads(berkas_gp.getvalue().decode('utf-8'))
+                            tanda = json.dumps(isi, sort_keys=True)
+                            if st.session_state.get('pr_tanda') != tanda:
+                                st.session_state['pr_target'] = {
+                                    str(k).upper(): float(v) for k, v in isi.items()}
+                                st.session_state['pr_tanda'] = tanda
+                                st.session_state['pr_versi'] = st.session_state.get('pr_versi', 0) + 1
+                            st.success(f"Target dimuat untuk {len(isi)} cabang.")
+                        except Exception as e:  # noqa: BLE001
+                            st.error(f"Berkas target tidak terbaca: {e}")
+
+                    _simpan = st.session_state.get('pr_target') or TARGET_GP_AWAL
+                    df_target = pd.DataFrame({
+                        'CABANG': list(pr.index),
+                        KOL_TARGET_GP: [
+                            float(_simpan.get(str(c).upper(),
+                                              TARGET_GP_AWAL.get(str(c).upper(), 0.0)))
+                            for c in pr.index]})
+                    ed_gp = st.data_editor(
+                        df_target, use_container_width=True, hide_index=True,
+                        num_rows='fixed',
+                        key=f"pr_editor_{st.session_state.get('pr_versi', 0)}",
+                        column_config={
+                            'CABANG': st.column_config.TextColumn('CABANG',
+                                                                  disabled=True),
+                            KOL_TARGET_GP: st.column_config.NumberColumn(
+                                KOL_TARGET_GP, min_value=0, step=10_000_000,
+                                format="%d")})
+                    target_map = {}
+                    try:
+                        for _, b in pd.DataFrame(ed_gp).iterrows():
+                            nilai = pd.to_numeric(b[KOL_TARGET_GP], errors='coerce')
+                            if pd.notna(nilai) and float(nilai) > 0:
+                                target_map[str(b['CABANG']).upper()] = float(nilai)
+                    except Exception:  # noqa: BLE001
+                        target_map = {}
+                    st.session_state['pr_target'] = target_map
+
+                    st.download_button(
+                        "💾 Simpan target ini (.json)",
+                        data=json.dumps(target_map, indent=2).encode('utf-8'),
+                        file_name="target_gross_profit_cabang.json",
+                        mime="application/json", key='pr_simpan')
+                    if not target_map:
+                        st.info(
+                            "Belum ada target yang terisi. Ketik angkanya pada "
+                            "tabel di atas, lalu simpan sebagai berkas `.json`."
+                        )
+                    else:
+                        st.caption(
+                            f"Total target seluruh cabang: "
+                            f"**{rp(sum(target_map.values()))}** per Samurai "
+                            f"(3 bulan), setara "
+                            f"{rp(sum(target_map.values()) / 3)} per bulan.")
+
+                pr['Target GP'] = [target_map.get(str(c).upper(), float('nan'))
+                                   for c in pr.index]
+                # Target berlaku untuk satu Samurai penuh, jadi pencapaian
+                # dibandingkan dengan bagian target yang sepadan hari berjalan.
+                pr['Target s/d Kini'] = pr['Target GP'] * porsi_hari
+                pr['% Target GP'] = pr['Gross Profit'] / pr['Target s/d Kini'] * 100
+
+                # ---------------- ambang klasifikasi ----------------
+                with st.expander("⚙️ Atur ambang klasifikasi", expanded=False):
+                    a1, a2 = st.columns(2)
+                    with a1:
+                        amb_done = float(st.number_input(
+                            "Batas aman % Gadget Done", min_value=0.0,
+                            max_value=100.0, value=85.0, step=1.0,
+                            key='pr_amb_done'))
+                        amb_svc = float(st.number_input(
+                            "Batas aman % Omzet Service", min_value=0.0,
+                            max_value=100.0, value=50.0, step=1.0,
+                            key='pr_amb_svc'))
+                    with a2:
+                        amb_gp = float(st.number_input(
+                            "Batas aman % Target GP", min_value=0.0,
+                            max_value=300.0, value=100.0, step=5.0,
+                            key='pr_amb_gp'))
+                        amb_waspada = float(st.number_input(
+                            "Batas bawah kategori Waspada (% dari batas aman)",
+                            min_value=0.0, max_value=100.0, value=80.0, step=5.0,
+                            key='pr_amb_waspada'))
+
+                def _nilai(v, batas):
+                    """Skor satu ukuran: 2 aman, 1 waspada, 0 kritis, None bila
+                    ukurannya memang belum bisa dinilai."""
+                    if pd.isna(v) or pd.isna(batas) or batas <= 0:
+                        return None
+                    if v >= batas:
+                        return 2
+                    if v >= batas * amb_waspada / 100:
+                        return 1
+                    return 0
+
+                skor, kelas = [], []
+                for c in pr.index:
+                    n = [_nilai(pr.loc[c, '% Done'], amb_done),
+                         _nilai(pr.loc[c, '% Service'], amb_svc),
+                         _nilai(pr.loc[c, '% Target GP'], amb_gp)]
+                    dinilai = [x for x in n if x is not None]
+                    s = (sum(dinilai) / (2 * len(dinilai)) * 100) if dinilai else float('nan')
+                    skor.append(s)
+                    kelas.append('AMAN' if s >= 80 else
+                                 ('WASPADA' if s >= 50 else 'KRITIS')
+                                 if pd.notna(s) else '—')
+                pr['Skor'] = skor
+                pr['Klasifikasi'] = kelas
+                pr = pr.sort_values('Skor', ascending=False)
+
+                WARNA_KELAS = {'AMAN': '#16a34a', 'WASPADA': '#e0921f',
+                               'KRITIS': '#c0392b', '—': '#94a3b8'}
+
+                # ---------------- KPI ----------------
+                unit_all = float(pr['Unit Masuk'].sum())
+                done_all = float(pr['Done'].sum())
+                omzet_all = float(pr['Omzet'].sum())
+                svc_all = float(pr['Omzet Service'].sum())
+                gp_all = float(pr['Gross Profit'].sum())
+                tgt_all = float(pr['Target GP'].sum(skipna=True))
+                tgt_kini = tgt_all * porsi_hari
+                n_aman = int((pr['Klasifikasi'] == 'AMAN').sum())
+                n_kritis = int((pr['Klasifikasi'] == 'KRITIS').sum())
+                pct_done_all = done_all / unit_all * 100 if unit_all else 0
+                pct_svc_all = svc_all / omzet_all * 100 if omzet_all else 0
+                pct_gp_all = gp_all / tgt_kini * 100 if tgt_kini else float('nan')
+
+                st.markdown(kpi_html([
+                    {'label': 'Unit Masuk', 'value': nfid(unit_all),
+                     'sub': f"{nfid(len(pr))} cabang · {nfid(hari_jalan)} dari "
+                            f"{nfid(hari_total)} hari",
+                     'grad': 'linear-gradient(135deg,#3b5bfd,#5a72ff)'},
+                    {'label': 'Gadget Done', 'value': pctid(pct_done_all),
+                     'sub': f"{nfid(done_all)} unit selesai",
+                     'grad': ('linear-gradient(135deg,#16a34a,#22c55e)'
+                              if pct_done_all >= amb_done
+                              else 'linear-gradient(135deg,#f59e0b,#fbbf24)')},
+                    {'label': 'Omzet Service', 'value': pctid(pct_svc_all),
+                     'sub': f"{rp(svc_all)} dari {rp(omzet_all)}",
+                     'grad': ('linear-gradient(135deg,#0f8a82,#17a3a3)'
+                              if pct_svc_all >= amb_svc
+                              else 'linear-gradient(135deg,#f59e0b,#fbbf24)')},
+                    {'label': 'Gross Profit', 'value': rp(gp_all),
+                     'sub': (f"target s/d kini {rp(tgt_kini)}" if tgt_all
+                             else 'target belum diisi'),
+                     'grad': 'linear-gradient(135deg,#7c3aed,#a855f7)'},
+                    {'label': '% Target GP',
+                     'value': (pctid(pct_gp_all) if pd.notna(pct_gp_all) else '—'),
+                     'sub': ('terhadap target berjalan' if tgt_all
+                             else 'isi target dulu'),
+                     'grad': ('linear-gradient(135deg,#16a34a,#22c55e)'
+                              if (pd.notna(pct_gp_all) and pct_gp_all >= 100)
+                              else 'linear-gradient(135deg,#dc2626,#ef4444)')},
+                    {'label': 'Cabang Aman', 'value': f"{nfid(n_aman)}/{nfid(len(pr))}",
+                     'sub': f"{nfid(n_kritis)} kritis",
+                     'grad': ('linear-gradient(135deg,#16a34a,#22c55e)'
+                              if n_aman >= len(pr) / 2
+                              else 'linear-gradient(135deg,#dc2626,#ef4444)')},
+                ]), unsafe_allow_html=True)
+                st.write("")
+
+                if belum_penuh:
+                    st.info(
+                        f"ℹ️ **{label_samurai(sam)}** baru berjalan "
+                        f"**{nfid(hari_jalan)} dari {nfid(hari_total)} hari** "
+                        f"({pctid(porsi_hari * 100)}). Target gross profit "
+                        f"otomatis diproporsikan sesuai hari berjalan. Angka "
+                        f"**% Gadget Done** tetap perlu dibaca hati-hati: unit "
+                        f"yang baru masuk belum sempat selesai, sehingga "
+                        f"persentasenya selalu lebih rendah dari keadaan "
+                        f"sebenarnya dan akan naik sendiri seiring waktu."
+                    )
+
+                # ---------------- grafik ----------------
+                st.markdown("#### Peringkat Cabang")
+                g1, g2 = st.columns([1, 1])
+                with g1:
+                    urut = pr.sort_values('% Done')
+                    figd = go.Figure()
+                    figd.add_bar(
+                        y=urut.index, x=urut['% Done'], orientation='h',
+                        marker_color=[WARNA_KELAS[k] for k in urut['Klasifikasi']],
+                        text=[pctid(v) for v in urut['% Done']],
+                        hovertemplate='%{y}<br>%{x:.1f}% done<extra></extra>')
+                    figd.add_vline(x=amb_done, line_dash='dash',
+                                   line_color='#1f3864',
+                                   annotation_text=f"batas {pctid(amb_done)}")
+                    figd.update_layout(
+                        height=max(340, 24 * len(pr) + 90),
+                        margin=dict(l=10, r=40, t=30, b=10),
+                        xaxis=dict(title='% Gadget Done'),
+                        yaxis=dict(title=''), showlegend=False,
+                        plot_bgcolor='#ffffff')
+                    figd.update_traces(textposition='outside', cliponaxis=False)
+                    st.plotly_chart(figd, use_container_width=True, key='pr_done')
+
+                with g2:
+                    urut2 = pr.sort_values('% Service')
+                    figs2 = go.Figure()
+                    figs2.add_bar(
+                        y=urut2.index, x=urut2['% Service'], orientation='h',
+                        marker_color=[WARNA_KELAS[k] for k in urut2['Klasifikasi']],
+                        text=[pctid(v) for v in urut2['% Service']],
+                        hovertemplate='%{y}<br>%{x:.1f}% dari omzet<extra></extra>')
+                    figs2.add_vline(x=amb_svc, line_dash='dash',
+                                    line_color='#1f3864',
+                                    annotation_text=f"batas {pctid(amb_svc)}")
+                    figs2.update_layout(
+                        height=max(340, 24 * len(pr) + 90),
+                        margin=dict(l=10, r=40, t=30, b=10),
+                        xaxis=dict(title='% Omzet Service dari total omzet'),
+                        yaxis=dict(title=''), showlegend=False,
+                        plot_bgcolor='#ffffff')
+                    figs2.update_traces(textposition='outside', cliponaxis=False)
+                    st.plotly_chart(figs2, use_container_width=True, key='pr_svc')
+
+                if pr['Target GP'].notna().any():
+                    st.markdown("#### Gross Profit vs Target Berjalan")
+                    pt = pr[pr['Target GP'].notna()].sort_values('% Target GP')
+                    figg = go.Figure()
+                    figg.add_bar(y=pt.index, x=pt['Target s/d Kini'],
+                                 orientation='h', name='Target s/d kini',
+                                 marker_color='#cbd5e1',
+                                 hovertemplate='%{y}<br>Target: Rp %{x:,.0f}<extra></extra>')
+                    figg.add_bar(y=pt.index, x=pt['Gross Profit'],
+                                 orientation='h', name='Gross profit nyata',
+                                 marker_color=[WARNA_KELAS[k] for k in pt['Klasifikasi']],
+                                 text=[pctid(v) for v in pt['% Target GP']],
+                                 hovertemplate='%{y}<br>GP: Rp %{x:,.0f}<extra></extra>')
+                    figg.update_layout(
+                        barmode='overlay', height=max(320, 26 * len(pt) + 90),
+                        margin=dict(l=10, r=50, t=30, b=10),
+                        xaxis=dict(title='Rupiah'), yaxis=dict(title=''),
+                        legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0),
+                        plot_bgcolor='#ffffff')
+                    figg.update_traces(textposition='outside', cliponaxis=False,
+                                       selector=dict(name='Gross profit nyata'))
+                    st.plotly_chart(figg, use_container_width=True, key='pr_gp')
+                    st.caption(
+                        "Batang abu-abu adalah bagian target yang seharusnya "
+                        "sudah tercapai sampai hari ini; batang berwarna adalah "
+                        "gross profit nyata.")
+
+                # ---------------- tabel ----------------
+                st.markdown("#### Rekap Lengkap per Cabang")
+                kol_tampil = ['Klasifikasi', 'Skor', 'Unit Masuk', 'Done',
+                              '% Done', 'Pending', 'Cancel', 'Omzet',
+                              'Omzet Service', '% Service', 'Gross Profit',
+                              'Target GP', 'Target s/d Kini', '% Target GP']
+                st.dataframe(
+                    pr[kol_tampil].style.format({
+                        'Skor': '{:.0f}', 'Unit Masuk': '{:,.0f}',
+                        'Done': '{:,.0f}', '% Done': '{:.1f}%',
+                        'Pending': '{:,.0f}', 'Cancel': '{:,.0f}',
+                        'Omzet': 'Rp {:,.0f}', 'Omzet Service': 'Rp {:,.0f}',
+                        '% Service': '{:.1f}%', 'Gross Profit': 'Rp {:,.0f}',
+                        'Target GP': 'Rp {:,.0f}',
+                        'Target s/d Kini': 'Rp {:,.0f}',
+                        '% Target GP': '{:.1f}%'}, na_rep='—'),
+                    use_container_width=True, height=460, key='pr_tabel')
+                st.download_button(
+                    "⬇️ Unduh produktivitas cabang (CSV)",
+                    data=pr[kol_tampil].reset_index().rename(
+                        columns={'index': 'CABANG'}).to_csv(index=False).encode('utf-8-sig'),
+                    file_name=f"produktivitas_cabang_samurai_{int(sam)}.csv",
+                    mime="text/csv", key='pr_unduh')
+
+                # ---------------- tren antar Samurai ----------------
+                st.markdown("---")
+                st.markdown("#### Perbandingan Antar Samurai")
+                _all = data.copy()
+                _all['SAM'] = nomor_samurai(_all['TGL PENGIRIMAN'])
+                _tren = (_all.dropna(subset=['SAM'])
+                         .groupby('SAM')
+                         .apply(lambda x: pd.Series({
+                             'Unit': len(x),
+                             '% Done': (x['STATUS_BUCKET'] == 'DONE').sum() / len(x) * 100}),
+                                include_groups=False))
+                _tren = _tren[_tren['Unit'] >= 100]
+                if len(_tren) >= 2:
+                    figt2 = go.Figure()
+                    _lbl = [f"SAM {int(i)}" + ("*" if int(i) == int(sam) and belum_penuh else "")
+                            for i in _tren.index]
+                    figt2.add_bar(x=_lbl, y=_tren['Unit'], name='Unit masuk',
+                                  marker_color=['#94a3b8' if (int(i) == int(sam) and belum_penuh)
+                                                else '#1f3864' for i in _tren.index],
+                                  hovertemplate='%{x}<br>%{y:,.0f} unit<extra></extra>')
+                    figt2.add_trace(go.Scatter(
+                        x=_lbl, y=_tren['% Done'], name='% Done', yaxis='y2',
+                        mode='lines+markers+text', line=dict(color='#16a34a', width=3),
+                        marker=dict(size=9),
+                        text=[pctid(v) for v in _tren['% Done']],
+                        textposition='top center', textfont=dict(size=10),
+                        hovertemplate='%{x}<br>%{y:.1f}% done<extra></extra>'))
+                    figt2.update_layout(
+                        height=400, margin=dict(l=10, r=10, t=40, b=10),
+                        yaxis=dict(title='Unit masuk'),
+                        yaxis2=dict(title='% Done', overlaying='y', side='right',
+                                    range=[0, 100], showgrid=False),
+                        legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0),
+                        plot_bgcolor='#ffffff')
+                    st.plotly_chart(figt2, use_container_width=True, key='pr_tren')
+                    if belum_penuh:
+                        st.caption(
+                            f"* Samurai {int(sam)} belum penuh — batangnya "
+                            f"pendek karena periodenya baru berjalan "
+                            f"{pctid(porsi_hari * 100)}, bukan karena "
+                            f"transaksinya turun.")
+
+                # ---------------- analisa ----------------
+                st.markdown("### 🧭 Analisa & Tindak Lanjut")
+                _ipr = []
+
+                _kritis = pr[pr['Klasifikasi'] == 'KRITIS']
+                _aman = pr[pr['Klasifikasi'] == 'AMAN']
+
+                _ipr.append((
+                    'baik' if n_aman >= len(pr) * 0.6 else
+                    ('perhatian' if n_aman >= len(pr) * 0.3 else 'aksi'),
+                    f"Posisi {label_samurai(sam)}",
+                    f"<b>{nfid(n_aman)} dari {nfid(len(pr))} cabang</b> berkategori "
+                    f"AMAN, <b>{nfid(int((pr['Klasifikasi'] == 'WASPADA').sum()))}</b> "
+                    f"WASPADA, dan <b>{nfid(n_kritis)}</b> KRITIS. Secara "
+                    f"keseluruhan: gadget done <b>{pctid(pct_done_all)}</b>, "
+                    f"omzet service <b>{pctid(pct_svc_all)}</b> dari total omzet "
+                    f"{rp(omzet_all)}, gross profit <b>{rp(gp_all)}</b>."))
+
+                _lo_done = pr['% Done'].idxmin()
+                _hi_done = pr['% Done'].idxmax()
+                _ipr.append((
+                    'aksi', "Jarak ketuntasan antar cabang",
+                    f"<b>{_hi_done}</b> menuntaskan "
+                    f"<b>{pctid(float(pr.loc[_hi_done, '% Done']))}</b> unit yang "
+                    f"masuk, sementara <b>{_lo_done}</b> hanya "
+                    f"<b>{pctid(float(pr.loc[_lo_done, '% Done']))}</b> — beda "
+                    f"<b>{pctid(float(pr['% Done'].max() - pr['% Done'].min()))}</b> "
+                    f"poin. Di {_lo_done} ada "
+                    f"<b>{nfid(float(pr.loc[_lo_done, 'Pending']))} unit pending</b> "
+                    f"dan <b>{nfid(float(pr.loc[_lo_done, 'Cancel']))} cancel</b> "
+                    f"dari {nfid(float(pr.loc[_lo_done, 'Unit Masuk']))} unit masuk. "
+                    f"Unit yang tertahan bukan sekadar angka — tiap unit adalah "
+                    f"satu pelanggan yang sedang menunggu."))
+
+                if omzet_all:
+                    _lo_svc = pr['% Service'].idxmin()
+                    _hi_svc = pr['% Service'].idxmax()
+                    _ipr.append((
+                        'perhatian', "Ketergantungan pada penjualan barang",
+                        f"<b>{_lo_svc}</b> hanya mendapat "
+                        f"<b>{pctid(float(pr.loc[_lo_svc, '% Service']))}</b> "
+                        f"omzetnya dari service, padahal omzet totalnya "
+                        f"{rp(float(pr.loc[_lo_svc, 'Omzet']))} — sisanya dari "
+                        f"penjualan barang yang marginnya jauh lebih tipis. "
+                        f"Bandingkan dengan <b>{_hi_svc}</b> yang mencapai "
+                        f"<b>{pctid(float(pr.loc[_hi_svc, '% Service']))}</b>. "
+                        f"Cabang bertumpu pada penjualan barang bisa terlihat "
+                        f"besar omzetnya tapi tipis labanya, dan lebih rentan "
+                        f"saat harga barang bergerak."))
+
+                if len(_kritis):
+                    _ipr.append((
+                        'aksi', f"{nfid(len(_kritis))} cabang perlu ditangani lebih dulu",
+                        "<b>" + ", ".join(str(i) for i in _kritis.index) + "</b>. "
+                        f"Gabungan unit masuk mereka "
+                        f"<b>{nfid(float(_kritis['Unit Masuk'].sum()))}</b> "
+                        f"({pctid(float(_kritis['Unit Masuk'].sum()) / unit_all * 100 if unit_all else 0)} "
+                        f"dari seluruh unit), jadi perbaikan di sini berdampak "
+                        f"besar pada angka keseluruhan. Mulai dari yang skornya "
+                        f"paling rendah, dan lihat ukuran mana yang jatuh — "
+                        f"ketuntasan, porsi service, atau gross profit — karena "
+                        f"tindakannya berbeda-beda."))
+
+                if not tgt_all:
+                    _ipr.append((
+                        'perhatian', "Target gross profit belum diisi",
+                        "Kolom target masih kosong, sehingga ukuran ketiga belum "
+                        "ikut dinilai dan klasifikasi baru berdasarkan dua ukuran "
+                        "saja. Isi targetnya lewat <b>🎯 Atur target gross profit "
+                        "per cabang</b> di atas, lalu simpan sebagai berkas "
+                        "<code>.json</code> agar tidak hilang saat aplikasi tidur."))
+
+                _ipr.append((
+                    'info', "Cara angka ini dihitung",
+                    f"<b>Periode</b>: {label_samurai(sam)} = "
+                    f"{mulai_s.strftime('%d %b')} – {akhir_s.strftime('%d %b %Y')} "
+                    f"(satu Samurai = satu kuartal; Januari–Maret 2026 = "
+                    f"Samurai 37).<br>"
+                    f"<b>% Gadget Done</b> = unit berstatus DONE ÷ seluruh unit "
+                    f"masuk pada periode itu, dari data pengiriman pesanan.<br>"
+                    f"<b>% Omzet Service</b> = omzet service ÷ omzet seluruh "
+                    f"cabang tersebut, memakai sumber "
+                    f"<b>{sumber_svc}</b>.<br>"
+                    f"<b>Gross profit</b> = TOTAL HARGA − HARGA BELI, belum "
+                    f"dipotong bagi hasil teknisi dan biaya cabang. Target "
+                    f"diproporsikan mengikuti hari berjalan "
+                    f"({nfid(hari_jalan)} dari {nfid(hari_total)} hari).<br>"
+                    f"<b>Skor</b> = rata-rata nilai ketiga ukuran (aman 2, "
+                    f"waspada 1, kritis 0). Ukuran yang belum bisa dinilai — "
+                    f"misalnya target yang belum diisi — tidak ikut dihitung "
+                    f"supaya tidak menurunkan skor secara keliru."))
+
+                panel_analisa(_ipr)
+
+                _pot_pr = potong_periode(
+                    data if f_cabang == 'Semua Cabang'
+                    else data[data['CABANG'] == f_cabang], 'TGL PENGIRIMAN')
+                _metrik_pr = [
+                    ("Unit Masuk", lambda x: len(x), lambda v: nfid(v), True),
+                    ("Unit Selesai",
+                     lambda x: int((x['STATUS_BUCKET'] == 'DONE').sum()),
+                     lambda v: nfid(v), True),
+                    ("% Done", lambda x: ((x['STATUS_BUCKET'] == 'DONE').sum()
+                                          / len(x) * 100) if len(x) else 0,
+                     lambda v: pctid(v), True),
+                    ("Unit Pending",
+                     lambda x: int((x['STATUS_BUCKET'] == 'PENDING').sum()),
+                     lambda v: nfid(v), False),
+                ]
+                tombol_pdf(
+                    f"Produktivitas Cabang — Samurai {int(sam)}",
+                    _pot_pr, _metrik_pr,
+                    temuan=[(j, ju, re.sub('<[^>]+>', '', isi.replace('<br>', ' ')))
+                            for j, ju, isi in _ipr],
+                    kpis=[{'label': 'Unit Masuk', 'value': nfid(unit_all),
+                           'sub': f"{nfid(len(pr))} cabang", 'warna': _PN},
+                          {'label': 'Gadget Done', 'value': pctid(pct_done_all),
+                           'sub': f"{nfid(done_all)} unit", 'warna': _PG},
+                          {'label': 'Omzet Service', 'value': pctid(pct_svc_all),
+                           'sub': f"{rp(svc_all)} dari {rp(omzet_all)}",
+                           'warna': _PN},
+                          {'label': 'Gross Profit', 'value': rp(gp_all),
+                           'sub': (f"target s/d kini {rp(tgt_kini)}" if tgt_all
+                                   else 'target belum diisi'), 'warna': _PA},
+                          {'label': 'Cabang Aman',
+                           'value': f"{nfid(n_aman)}/{nfid(len(pr))}",
+                           'sub': f"{nfid(n_kritis)} kritis",
+                           'warna': (_PG if n_aman >= len(pr) / 2 else _PR)}],
+                    metodologi=(
+                        f"Periode {label_samurai(sam)} "
+                        f"({mulai_s.strftime('%d %b %Y')} - "
+                        f"{akhir_s.strftime('%d %b %Y')}). Satu Samurai sama "
+                        f"dengan satu kuartal kalender; Januari-Maret 2026 "
+                        f"ditetapkan sebagai Samurai 37. Persentase gadget done "
+                        f"dihitung dari data pengiriman pesanan (unit DONE "
+                        f"dibagi seluruh unit masuk). Omzet service memakai "
+                        f"sumber {sumber_svc} pada data faktur penjualan. Gross "
+                        f"profit = TOTAL HARGA - HARGA BELI, belum dipotong bagi "
+                        f"hasil teknisi maupun biaya cabang. Target gross profit "
+                        f"berlaku untuk satu Samurai penuh dan diproporsikan "
+                        f"mengikuti hari berjalan ({hari_jalan} dari "
+                        f"{hari_total} hari)."),
+                    ringkasan=(
+                        f"{nfid(len(pr))} cabang pada {label_samurai(sam)}: "
+                        f"{nfid(unit_all)} unit masuk, {pctid(pct_done_all)} "
+                        f"selesai, omzet service {pctid(pct_svc_all)}, gross "
+                        f"profit {rp(gp_all)}. {nfid(n_aman)} cabang aman, "
+                        f"{nfid(n_kritis)} kritis."),
+                    key='pr')
+
+                with st.expander("ℹ️ Catatan perhitungan"):
+                    st.write(
+                        f"**Periode Samurai.** Satu Samurai = satu kuartal "
+                        f"kalender. Acuannya Januari–Maret 2026 = Samurai 37, "
+                        f"sehingga Juli–September 2026 = Samurai 39 — sesuai "
+                        f"laporan pekanan perusahaan. Nomor berikutnya bertambah "
+                        f"sendiri tanpa perlu diatur.\n\n"
+                        f"**% Gadget Done.** Dari data pengiriman pesanan: unit "
+                        f"berstatus DONE dibagi seluruh unit yang masuk pada "
+                        f"periode itu. Pada periode yang belum selesai, angka "
+                        f"ini selalu lebih rendah dari kenyataan karena unit "
+                        f"yang baru masuk belum sempat dikerjakan.\n\n"
+                        f"**% Omzet Service.** Bawaannya memakai kolom "
+                        f"`KATEGORI PENJUALAN` karena terisi hampir seluruh "
+                        f"baris. Pilihan `Kategori Pilar` juga tersedia, tapi "
+                        f"kolom itu baru terisi sebagian kecil sehingga "
+                        f"perbandingan antar cabang menjadi tidak adil — cabang "
+                        f"yang rajin mengisi akan terlihat lebih besar.\n\n"
+                        f"**Gross profit.** TOTAL HARGA − HARGA BELI. `HARGA "
+                        f"BELI` di sumber ini sudah berupa total per baris, "
+                        f"bukan harga satuan. Belum dipotong bagi hasil teknisi "
+                        f"dan biaya operasional cabang.\n\n"
+                        f"**Klasifikasi.** Tiap ukuran dinilai terhadap "
+                        f"ambangnya: aman (2), waspada (1), kritis (0). Skor "
+                        f"adalah rata-ratanya dalam persen — AMAN bila ≥ 80, "
+                        f"WASPADA bila ≥ 50, selain itu KRITIS. Ambangnya bisa "
+                        f"diubah lewat **⚙️ Atur ambang klasifikasi**."
+                    )

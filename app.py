@@ -1471,12 +1471,12 @@ if st.session_state.get("ppt_bytes"):
 # ---------------------------------------------------------------------------
 (tab_main, tab_pending, tab_done, tab_cancel, tab_mati, tab_jual, tab_mlf,
  tab_tek, tab_bundling, tab_reward, tab_pelanggan, tab_pilar,
- tab_produktif) = st.tabs(
+ tab_produktif, tab_umair) = st.tabs(
     ["📊 Dashboard Utama", "⚠️ Dashboard Pending", "✅ Dashboard Done",
      "🚫 Dashboard Cancel", "🔌 Mati Total", "💰 Penjualan", "🎫 Voucher MLF",
      "🧰 Omzet & Bagi Hasil Teknisi", "🎁 Bundling Aksesoris",
      "🏆 Budget Bundling Nota", "👥 Kategori Pelanggan", "🏛️ Kategori Pilar",
-     "🥇 Produktivitas Cabang"]
+     "🥇 Produktivitas Cabang", "🧴 Umair Quantum"]
 )
 
 # =============================================================================
@@ -6060,4 +6060,428 @@ with tab_produktif:
                         f"adalah rata-ratanya dalam persen — AMAN bila ≥ 80, "
                         f"WASPADA bila ≥ 50, selain itu KRITIS. Ambangnya bisa "
                         f"diubah lewat **⚙️ Atur ambang klasifikasi**."
+                    )
+
+
+# =============================================================================
+# TAB 14: PENJUALAN UMAIR QUANTUM
+# =============================================================================
+TARGET_UQ_AWAL = 16_000          # target seluruh cabang, dalam satuan botol
+
+
+def baris_umair_quantum(sf: pd.DataFrame) -> pd.Series:
+    """Penanda baris penjualan Umair Quantum.
+
+    Penulisan nama barang di sumber tidak seragam: selain `UMAIR QUANTUM 30ML`
+    ada juga `UMAIR QUANTUM 3OML` — memakai huruf O, bukan angka nol. Kalau
+    hanya mencocokkan satu bentuk, penjualan cabang yang menulis dengan huruf O
+    hilang begitu saja dari perhitungan.
+    """
+    if sf is None or sf.empty or 'NAMA BARANG' not in sf.columns:
+        return pd.Series(dtype=bool)
+    nb = (sf['NAMA BARANG'].astype(str).str.upper()
+          .str.replace('3OML', '30ML', regex=False))
+    return nb.str.contains('UMAIR', na=False) & nb.str.contains('QUANTUM', na=False)
+
+
+with tab_umair:
+    st.markdown("## Penjualan Umair Quantum")
+    st.caption(
+        "Pencapaian penjualan Umair Quantum terhadap target, dibagi rata ke "
+        "seluruh cabang."
+    )
+
+    if sales.empty:
+        st.warning(
+            "Dashboard ini membutuhkan data penjualan. Pastikan "
+            "`data/penjualan.csv.gz` ada di repo, atau upload lewat sidebar."
+        )
+    else:
+        _uq_semua = sales[baris_umair_quantum(sales)]
+        if _uq_semua.empty:
+            st.warning(
+                "Tidak ditemukan penjualan Umair Quantum pada data. Periksa "
+                "penulisan nama barang pada berkas penjualan."
+            )
+        else:
+            # Program ini punya periodenya sendiri (6 bulan sejak September
+            # 2026), bukan mengikuti periode Samurai seperti dashboard lain.
+            u1, u2, u3, u4 = st.columns([1.1, 0.8, 1, 1])
+            with u1:
+                mulai_prog = st.date_input(
+                    "Program mulai", value=date(2026, 9, 1), key='uq_mulai')
+            with u2:
+                lama_bln = int(st.number_input(
+                    "Lama (bulan)", min_value=1, max_value=36, value=6, step=1,
+                    key='uq_lama'))
+            with u3:
+                target_total_u = float(st.number_input(
+                    "Target seluruh cabang (botol)", min_value=0.0,
+                    max_value=1_000_000.0, value=float(TARGET_UQ_AWAL),
+                    step=500.0, format="%.0f", key='uq_target'))
+            with u4:
+                n_cab_bagi = int(st.number_input(
+                    "Dibagi berapa cabang", min_value=1, max_value=100,
+                    value=18, step=1, key='uq_ncab',
+                    help="Target dibagi rata ke seluruh cabang."))
+
+            target_cab = target_total_u / n_cab_bagi if n_cab_bagi else 0
+            mulai_u = pd.Timestamp(mulai_prog)
+            akhir_u = mulai_u + pd.DateOffset(months=lama_bln) - pd.Timedelta(days=1)
+            label_prog = (f"{mulai_u.strftime('%d %B %Y')} – "
+                          f"{akhir_u.strftime('%d %B %Y')} ({lama_bln} bulan)")
+            st.caption(f"**Periode program:** {label_prog}")
+
+            uq = _uq_semua[(_uq_semua['TGL'] >= mulai_u)
+                           & (_uq_semua['TGL'] <= akhir_u)]
+            sebelum = _uq_semua[_uq_semua['TGL'] < mulai_u]
+            tgl_data = pd.Timestamp(sales['TGL'].max())
+
+            if not sebelum.empty:
+                st.info(
+                    f"ℹ️ Ada **{nfid(float(sebelum['QTY'].sum()))} botol** "
+                    f"terjual **sebelum program dimulai** "
+                    f"({pd.Timestamp(sebelum['TGL'].min()).strftime('%d %B')}–"
+                    f"{pd.Timestamp(sebelum['TGL'].max()).strftime('%d %B %Y')}, "
+                    f"{nfid(float(sebelum['TGL'].dt.normalize().nunique()))} hari). "
+                    f"Penjualan itu **tidak dihitung** ke dalam pencapaian "
+                    f"program, tapi berguna sebagai gambaran awal laju "
+                    f"penjualan: rata-rata "
+                    f"**{nfid(float(sebelum['QTY'].sum()) / max(sebelum['TGL'].dt.normalize().nunique(), 1), 1)} "
+                    f"botol/hari** sebelum program resmi berjalan."
+                )
+
+            if uq.empty:
+                _hari_prog = (akhir_u - mulai_u).days + 1
+                _perlu = target_total_u / _hari_prog if _hari_prog else 0
+                _laju_awal = (float(sebelum['QTY'].sum())
+                              / max(sebelum['TGL'].dt.normalize().nunique(), 1)
+                              if not sebelum.empty else 0)
+                if tgl_data < mulai_u:
+                    st.markdown(kpi_html([
+                        {'label': 'Program Belum Mulai',
+                         'value': nfid((mulai_u - tgl_data).days),
+                         'sub': f"hari lagi · mulai {mulai_u.strftime('%d %b %Y')}",
+                         'grad': 'linear-gradient(135deg,#64748b,#94a3b8)'},
+                        {'label': 'Target', 'value': nfid(target_total_u),
+                         'sub': f"{nfid(target_cab, 0)}/cabang × {nfid(n_cab_bagi)}",
+                         'grad': 'linear-gradient(135deg,#7c3aed,#a855f7)'},
+                        {'label': 'Lama Program', 'value': nfid(_hari_prog),
+                         'sub': f"hari ({lama_bln} bulan)",
+                         'grad': 'linear-gradient(135deg,#3b5bfd,#5a72ff)'},
+                        {'label': 'Perlu / Hari', 'value': nfid(_perlu, 1),
+                         'sub': f"{nfid(_perlu / n_cab_bagi if n_cab_bagi else 0, 1)} per cabang",
+                         'grad': 'linear-gradient(135deg,#e0921f,#f0b13f)'},
+                    ]), unsafe_allow_html=True)
+                    st.write("")
+                    _lipat = (_perlu / _laju_awal) if _laju_awal else 0
+                    panel_analisa([(
+                        'info', "Yang perlu disiapkan sebelum program dimulai",
+                        f"Target <b>{nfid(target_total_u)} botol</b> dalam "
+                        f"<b>{nfid(_hari_prog)} hari</b> berarti "
+                        f"<b>{nfid(_perlu, 1)} botol per hari</b> untuk seluruh "
+                        f"cabang, atau <b>{nfid(_perlu / n_cab_bagi if n_cab_bagi else 0, 1)} "
+                        f"botol per cabang per hari</b>."
+                        + (f" Sebagai pembanding, laju penjualan sebelum program "
+                           f"berjalan <b>{nfid(_laju_awal, 1)} botol/hari</b> — "
+                           f"jadi perlu naik sekitar <b>{nfid(_lipat, 1)} kali "
+                           f"lipat</b>. " if _laju_awal else " ")
+                        + f"Tiga hal yang menentukan sejak hari pertama: stok "
+                        f"tersedia di semua cabang, tim tahu produknya, dan ada "
+                        f"cara mencatat penjualan hariannya."
+                    )])
+                else:
+                    st.warning("Belum ada penjualan pada periode program ini.")
+            else:
+                # Produk ini baru mulai dijual, jadi acuan hari dihitung sejak
+                # penjualan pertama di dalam periode program — bukan sejak
+                # tanggal mulai program. Kalau program sudah jalan tapi
+                # penjualannya baru dimulai beberapa hari kemudian,
+                # menghitung sejak tanggal mulai membuat lajunya terlihat
+                # lebih rendah daripada kenyataan.
+                tgl_mulai_jual = pd.Timestamp(uq['TGL'].min())
+                tgl_akhir = pd.Timestamp(min(sales['TGL'].max(), akhir_u))
+                hari_jual = max((tgl_akhir - tgl_mulai_jual).days + 1, 1)
+                hari_sisa = max((akhir_u - tgl_akhir).days, 0)
+
+                qty = float(uq['QTY'].sum())
+                omzet_u = float(uq['TOTAL HARGA'].sum())
+                laba_u = float(uq['LABA'].sum())
+                n_nota_u = uq.groupby(['CABANG', 'NO FAKTUR']).ngroups
+                pct_u = qty / target_total_u * 100 if target_total_u else 0
+                laju = qty / hari_jual
+                butuh = ((target_total_u - qty) / hari_sisa) if hari_sisa else 0
+
+                warna_u = ('linear-gradient(135deg,#16a34a,#22c55e)' if pct_u >= 100
+                           else ('linear-gradient(135deg,#f59e0b,#fbbf24)'
+                                 if pct_u >= 50
+                                 else 'linear-gradient(135deg,#dc2626,#ef4444)'))
+                st.markdown(kpi_html([
+                    {'label': 'Terjual', 'value': nfid(qty),
+                     'sub': f"botol · {nfid(n_nota_u)} nota",
+                     'grad': 'linear-gradient(135deg,#3b5bfd,#5a72ff)'},
+                    {'label': 'Target', 'value': nfid(target_total_u),
+                     'sub': f"{nfid(target_cab, 0)}/cabang × {nfid(n_cab_bagi)}",
+                     'grad': 'linear-gradient(135deg,#7c3aed,#a855f7)'},
+                    {'label': 'Pencapaian', 'value': pctid(pct_u),
+                     'sub': f"kurang {nfid(max(target_total_u - qty, 0))} botol",
+                     'grad': warna_u},
+                    {'label': 'Rata-rata / Hari', 'value': nfid(laju, 1),
+                     'sub': f"{nfid(hari_jual)} hari sejak penjualan pertama",
+                     'grad': 'linear-gradient(135deg,#0f8a82,#17a3a3)'},
+                    {'label': 'Perlu / Hari', 'value': (nfid(butuh, 1) if hari_sisa else '—'),
+                     'sub': (f"sisa {nfid(hari_sisa)} hari" if hari_sisa
+                             else 'periode berakhir'),
+                     'grad': 'linear-gradient(135deg,#dc2626,#ef4444)'},
+                    {'label': 'Omzet', 'value': rp(omzet_u),
+                     'sub': f"laba {rp(laba_u)}",
+                     'grad': 'linear-gradient(135deg,#16a34a,#22c55e)'},
+                ]), unsafe_allow_html=True)
+                st.write("")
+
+                st.info(
+                    f"ℹ️ Penjualan pertama tercatat "
+                    f"**{tgl_mulai_jual.strftime('%d %B %Y')}**, jadi produk ini "
+                    f"baru berjalan **{nfid(hari_jual)} hari**. Dengan laju "
+                    f"sekarang **{nfid(laju, 1)} botol/hari**, target "
+                    f"{nfid(target_total_u)} botol memerlukan sekitar "
+                    f"**{nfid(target_total_u / laju if laju else 0, 0)} hari**. "
+                    f"Untuk menutupnya sebelum {akhir_u.strftime('%d %B %Y')}, "
+                    f"lajunya perlu naik ke **{nfid(butuh, 1)} botol/hari** — "
+                    f"sekitar {nfid(butuh / laju if laju else 0, 1)} kali lipat."
+                )
+
+                # ---------------- per cabang ----------------
+                st.markdown("#### Pencapaian per Cabang")
+                cab_semua = sorted(sales['CABANG'].dropna().unique())
+                gu = pd.DataFrame(index=cab_semua)
+                gu['Terjual'] = uq.groupby('CABANG')['QTY'].sum().reindex(gu.index).fillna(0)
+                gu['Nota'] = (uq.drop_duplicates(subset=['CABANG', 'NO FAKTUR'])
+                              .groupby('CABANG').size().reindex(gu.index).fillna(0))
+                gu['Omzet'] = uq.groupby('CABANG')['TOTAL HARGA'].sum().reindex(gu.index).fillna(0)
+                gu['Target'] = target_cab
+                gu['% Target'] = gu['Terjual'] / target_cab * 100 if target_cab else 0
+                gu['Kurang'] = (target_cab - gu['Terjual']).clip(lower=0)
+                gu = gu.sort_values('Terjual', ascending=False)
+
+                belum = list(gu[gu['Terjual'] <= 0].index)
+                figu = go.Figure()
+                figu.add_bar(
+                    x=gu.index, y=gu['Terjual'],
+                    marker_color=['#c0392b' if v <= 0 else
+                                  ('#16a34a' if v >= target_cab else '#3f8ac9')
+                                  for v in gu['Terjual']],
+                    text=[nfid(v) for v in gu['Terjual']],
+                    textposition='outside',
+                    hovertemplate='%{x}<br>%{y:,.0f} botol<extra></extra>',
+                    name='Terjual')
+                figu.add_hline(y=target_cab, line_dash='dash', line_color='#7c3aed',
+                               annotation_text=f"target {nfid(target_cab, 0)}/cabang",
+                               annotation_position='top left')
+                figu.update_layout(
+                    height=430, margin=dict(l=10, r=10, t=40, b=10),
+                    yaxis=dict(title='Botol terjual'), showlegend=False,
+                    plot_bgcolor='#ffffff')
+                figu.update_xaxes(tickangle=-35)
+                st.plotly_chart(figu, use_container_width=True, key='uq_cabang')
+                if belum:
+                    st.caption(
+                        f"Batang merah = belum ada penjualan sama sekali: "
+                        f"**{', '.join(belum)}**.")
+
+                st.dataframe(
+                    gu[['Terjual', 'Nota', 'Target', '% Target', 'Kurang',
+                        'Omzet']].style.format({
+                        'Terjual': '{:,.0f}', 'Nota': '{:,.0f}',
+                        'Target': '{:,.1f}', '% Target': '{:.1f}%',
+                        'Kurang': '{:,.0f}', 'Omzet': 'Rp {:,.0f}'}),
+                    use_container_width=True, height=420, key='uq_tabel')
+                st.download_button(
+                    "⬇️ Unduh pencapaian per cabang (CSV)",
+                    data=gu.reset_index().rename(columns={'index': 'CABANG'})
+                         .to_csv(index=False).encode('utf-8-sig'),
+                    file_name=(f"umair_quantum_{mulai_u.strftime('%Y%m')}_"
+                               f"{akhir_u.strftime('%Y%m')}.csv"),
+                    mime="text/csv", key='uq_unduh')
+
+                # ---------------- tren harian ----------------
+                st.markdown("#### Penjualan Harian")
+                hr = uq.groupby(uq['TGL'].dt.date)['QTY'].sum()
+                idx = pd.date_range(tgl_mulai_jual, tgl_akhir, freq='D').date
+                hr = hr.reindex(idx).fillna(0)
+                figh = go.Figure()
+                figh.add_bar(x=[str(i) for i in hr.index], y=hr.values,
+                             marker_color='#3f8ac9', name='Botol/hari',
+                             hovertemplate='%{x}<br>%{y:,.0f} botol<extra></extra>')
+                figh.add_trace(go.Scatter(
+                    x=[str(i) for i in hr.index], y=hr.cumsum().values,
+                    name='Kumulatif', yaxis='y2', mode='lines+markers',
+                    line=dict(color='#16a34a', width=3),
+                    hovertemplate='%{x}<br>kumulatif %{y:,.0f}<extra></extra>'))
+                figh.update_layout(
+                    height=380, margin=dict(l=10, r=10, t=40, b=10),
+                    yaxis=dict(title='Botol per hari'),
+                    yaxis2=dict(title='Kumulatif', overlaying='y', side='right',
+                                showgrid=False),
+                    legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0),
+                    plot_bgcolor='#ffffff')
+                st.plotly_chart(figh, use_container_width=True, key='uq_harian')
+
+                # ---------------- varian & penjual ----------------
+                with st.expander("🔎 Rincian produk & penjual"):
+                    st.markdown("**Penulisan nama barang yang terdeteksi**")
+                    vr = (uq.groupby('NAMA BARANG')
+                          .agg(Qty=('QTY', 'sum'), Baris=('QTY', 'size'))
+                          .sort_values('Qty', ascending=False))
+                    st.dataframe(vr.style.format({'Qty': '{:,.0f}',
+                                                  'Baris': '{:,.0f}'}),
+                                 use_container_width=True, key='uq_varian')
+                    st.caption(
+                        "Semua bentuk penulisan di atas dihitung sebagai satu "
+                        "produk yang sama — termasuk `3OML` yang memakai huruf "
+                        "O, bukan angka nol.")
+                    st.markdown("**Penjual teratas**")
+                    pj = (uq.groupby('PENJUAL')
+                          .agg(Qty=('QTY', 'sum'), Omzet=('TOTAL HARGA', 'sum'))
+                          .sort_values('Qty', ascending=False).head(15))
+                    st.dataframe(pj.style.format({'Qty': '{:,.0f}',
+                                                  'Omzet': 'Rp {:,.0f}'}),
+                                 use_container_width=True, key='uq_penjual')
+
+                # ---------------- analisa ----------------
+                st.markdown("### 🧭 Analisa & Tindak Lanjut")
+                _iu = []
+
+                _proyeksi = qty + laju * hari_sisa
+                _iu.append((
+                    'aksi' if pct_u < 50 else ('perhatian' if pct_u < 100 else 'baik'),
+                    "Jarak antara target dan laju sekarang",
+                    f"Terjual <b>{nfid(qty)} botol</b> dari target "
+                    f"<b>{nfid(target_total_u)}</b> — baru <b>{pctid(pct_u)}</b>. "
+                    f"Dengan laju <b>{nfid(laju, 1)} botol/hari</b> dan sisa "
+                    f"<b>{nfid(hari_sisa)} hari</b>, perkiraan sampai akhir "
+                    f"periode hanya <b>{nfid(_proyeksi, 0)} botol</b> "
+                    f"({pctid(_proyeksi / target_total_u * 100 if target_total_u else 0)} "
+                    f"dari target). Untuk benar-benar menutup target, penjualan "
+                    f"harian perlu naik dari {nfid(laju, 1)} ke "
+                    f"<b>{nfid(butuh, 1)}</b> botol — sekitar "
+                    f"<b>{nfid(butuh / laju if laju else 0, 1)} kali lipat</b>. "
+                    f"Angka sebesar ini biasanya tidak tercapai lewat dorongan "
+                    f"harian biasa; perlu diputuskan apakah targetnya yang "
+                    f"disesuaikan, atau ada program khusus yang menyertainya."))
+
+                if belum:
+                    _iu.append((
+                        'aksi', f"{nfid(len(belum))} cabang belum menjual sama sekali",
+                        f"<b>{', '.join(belum)}</b> belum mencatat satu pun "
+                        f"penjualan Umair Quantum. Karena produknya baru "
+                        f"berjalan {nfid(hari_jual)} hari, kemungkinan besar ini "
+                        f"soal ketersediaan barang atau pengenalan produk ke tim "
+                        f"— bukan soal kemampuan menjual. Ini yang paling cepat "
+                        f"membuahkan hasil: memastikan stoknya ada dan timnya "
+                        f"tahu produknya."))
+
+                _tim = gu[gu['Terjual'] > 0]
+                if len(_tim) >= 2:
+                    _hi = _tim['Terjual'].idxmax()
+                    _iu.append((
+                        'info', "Jarak antar cabang yang sudah menjual",
+                        f"<b>{_hi}</b> memimpin dengan "
+                        f"<b>{nfid(float(_tim['Terjual'].max()))} botol</b>, "
+                        f"sementara yang terendah di antara yang sudah menjual "
+                        f"hanya <b>{nfid(float(_tim['Terjual'].min()))}</b>. "
+                        f"Semua cabang memulai pada waktu yang sama dengan "
+                        f"target yang sama, jadi selisih ini murni soal cara "
+                        f"menawarkan. Menanyakan langsung ke {_hi} kemungkinan "
+                        f"lebih berguna daripada menambah tekanan target."))
+
+                _iu.append((
+                    'info', "Cara angka ini dihitung",
+                    f"Produk dikenali dari nama barang yang memuat kata "
+                    f"<b>UMAIR</b> dan <b>QUANTUM</b>. Penulisan "
+                    f"<code>3OML</code> (huruf O) disamakan dengan "
+                    f"<code>30ML</code> — tanpa penyamaan ini, "
+                    f"{nfid(float(uq[uq['NAMA BARANG'].astype(str).str.upper().str.contains('3OML')]['QTY'].sum()))} "
+                    f"botol akan hilang dari perhitungan. Jumlah memakai kolom "
+                    f"QTY, bukan jumlah baris. Target "
+                    f"<b>{nfid(target_total_u)} botol</b> dibagi rata ke "
+                    f"<b>{nfid(n_cab_bagi)} cabang</b> = "
+                    f"<b>{nfid(target_cab, 1)} botol per cabang</b>. Rata-rata "
+                    f"harian dihitung sejak penjualan pertama "
+                    f"({tgl_mulai_jual.strftime('%d %B %Y')}), bukan sejak awal "
+                    f"periode program — kalau dihitung sejak tanggal mulai "
+                    f"program, lajunya terlihat lebih rendah daripada "
+                    f"kenyataan."))
+
+                panel_analisa(_iu)
+
+                _pot_u = potong_periode(_uq_semua, 'TGL')
+                _metrik_u = [
+                    ("Botol Terjual", lambda x: float(x['QTY'].sum()),
+                     lambda v: nfid(v), True),
+                    ("Nota",
+                     lambda x: x.groupby(['CABANG', 'NO FAKTUR']).ngroups,
+                     lambda v: nfid(v), True),
+                    ("Omzet", lambda x: float(x['TOTAL HARGA'].sum()),
+                     lambda v: rp(v), True),
+                    ("Cabang Menjual", lambda x: int(x['CABANG'].nunique()),
+                     lambda v: nfid(v), True),
+                ]
+                tombol_pdf(
+                    "Penjualan Umair Quantum", _pot_u, _metrik_u,
+                    temuan=[(j, ju, re.sub('<[^>]+>', '', isi))
+                            for j, ju, isi in _iu],
+                    kpis=[{'label': 'Terjual', 'value': nfid(qty),
+                           'sub': f"{nfid(n_nota_u)} nota", 'warna': _PN},
+                          {'label': 'Target', 'value': nfid(target_total_u),
+                           'sub': f"{nfid(target_cab, 0)}/cabang", 'warna': _PN},
+                          {'label': 'Pencapaian', 'value': pctid(pct_u),
+                           'sub': f"kurang {nfid(max(target_total_u - qty, 0))} botol",
+                           'warna': (_PG if pct_u >= 100 else
+                                     (_PA if pct_u >= 50 else _PR))},
+                          {'label': 'Rata-rata / Hari', 'value': nfid(laju, 1),
+                           'sub': f"{nfid(hari_jual)} hari berjalan",
+                           'warna': _PA},
+                          {'label': 'Omzet', 'value': rp(omzet_u),
+                           'sub': f"laba {rp(laba_u)}", 'warna': _PG},
+                          {'label': 'Cabang Belum Menjual',
+                           'value': nfid(len(belum)),
+                           'sub': f"dari {nfid(len(gu))} cabang",
+                           'warna': (_PR if belum else _PG)}],
+                    metodologi=(
+                        "Produk dikenali dari nama barang yang memuat kata UMAIR "
+                        "dan QUANTUM. Penulisan 3OML (huruf O) disamakan dengan "
+                        "30ML supaya tidak ada penjualan yang terlewat. Jumlah "
+                        "memakai kolom QTY. Target dibagi rata ke seluruh "
+                        "cabang. Rata-rata harian dihitung sejak tanggal "
+                        f"penjualan pertama ({tgl_mulai_jual.strftime('%d %B %Y')}), "
+                        "bukan sejak tanggal mulai program, karena penjualan "
+                        "bisa saja baru dimulai beberapa hari setelahnya."),
+                    ringkasan=(
+                        f"{nfid(qty)} botol terjual dari target "
+                        f"{nfid(target_total_u)} ({pctid(pct_u)}) dalam "
+                        f"{nfid(hari_jual)} hari, senilai {rp(omzet_u)}. "
+                        f"{nfid(len(belum))} cabang belum menjual."),
+                    key='uq')
+
+                with st.expander("ℹ️ Catatan perhitungan"):
+                    st.write(
+                        f"**Produk.** Semua nama barang yang memuat kata UMAIR "
+                        f"dan QUANTUM. Di sumber data penulisannya tidak "
+                        f"seragam — ada `UMAIR QUANTUM 30ML` dan `UMAIR QUANTUM "
+                        f"3OML` (huruf O, bukan angka nol). Keduanya dihitung "
+                        f"sebagai produk yang sama.\n\n"
+                        f"**Jumlah.** Memakai kolom QTY, bukan jumlah baris. "
+                        f"Satu nota bisa memuat lebih dari satu botol.\n\n"
+                        f"**Target.** {nfid(target_total_u)} botol untuk seluruh "
+                        f"cabang, dibagi rata menjadi {nfid(target_cab, 1)} per "
+                        f"cabang. Keduanya bisa diubah di bagian atas tab.\n\n"
+                        f"**Rata-rata harian.** Dihitung sejak penjualan pertama "
+                        f"({tgl_mulai_jual.strftime('%d %B %Y')}), bukan sejak "
+                        f"tanggal mulai program. Kalau penjualan baru dimulai "
+                        f"beberapa hari setelah program berjalan, menghitung "
+                        f"sejak tanggal mulai akan membuat lajunya terlihat "
+                        f"lebih rendah daripada kenyataan.\n\n"
+                        f"**Omzet & laba.** TOTAL HARGA dan TOTAL HARGA − HARGA "
+                        f"BELI, belum dipotong biaya lain."
                     )

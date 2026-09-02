@@ -1476,7 +1476,7 @@ if st.session_state.get("ppt_bytes"):
      "🚫 Dashboard Cancel", "🔌 Mati Total", "💰 Penjualan", "🎫 Voucher MLF",
      "🧰 Omzet & Bagi Hasil Teknisi", "🎁 Bundling Aksesoris",
      "🏆 Budget Bundling Nota", "👥 Kategori Pelanggan", "🏛️ Kategori Pilar",
-     "🥇 Produktivitas Cabang", "🧴 Umair Quantum"]
+     "🥇 Produktivitas Cabang", "🧴 Parfum Quantum"]
 )
 
 # =============================================================================
@@ -6069,26 +6069,38 @@ with tab_produktif:
 TARGET_UQ_AWAL = 16_000          # target seluruh cabang, dalam satuan botol
 
 
-def baris_umair_quantum(sf: pd.DataFrame) -> pd.Series:
-    """Penanda baris penjualan Umair Quantum.
+MEREK_QUANTUM = ['UMAIR', 'ALPHASCENT']
 
-    Penulisan nama barang di sumber tidak seragam: selain `UMAIR QUANTUM 30ML`
-    ada juga `UMAIR QUANTUM 3OML` — memakai huruf O, bukan angka nol. Kalau
-    hanya mencocokkan satu bentuk, penjualan cabang yang menulis dengan huruf O
-    hilang begitu saja dari perhitungan.
+
+def baris_umair_quantum(sf: pd.DataFrame) -> pd.Series:
+    """Penanda baris penjualan parfum Quantum.
+
+    Dua hal yang membuat pencocokan sederhana gagal:
+
+    - **Merek ditulis berbeda antar cabang.** Cabang Bintara mencatatnya
+      sebagai `ALPHASCENT QUANTUM`, cabang lain `UMAIR QUANTUM`. Produknya
+      sama, jadi keduanya dihitung bersama — kalau tidak, Bintara akan
+      terlihat sama sekali belum menjual.
+    - **Penulisan ukuran tidak seragam.** Selain `30ML` ada `3OML` yang
+      memakai huruf O, bukan angka nol.
+
+    Kata QUANTUM tetap diwajibkan supaya varian parfum lain dengan merek sama
+    tidak ikut terhitung.
     """
     if sf is None or sf.empty or 'NAMA BARANG' not in sf.columns:
         return pd.Series(dtype=bool)
     nb = (sf['NAMA BARANG'].astype(str).str.upper()
           .str.replace('3OML', '30ML', regex=False))
-    return nb.str.contains('UMAIR', na=False) & nb.str.contains('QUANTUM', na=False)
+    merek = nb.str.contains('|'.join(MEREK_QUANTUM), na=False, regex=True)
+    return merek & nb.str.contains('QUANTUM', na=False)
 
 
 with tab_umair:
-    st.markdown("## Penjualan Umair Quantum")
+    st.markdown("## Penjualan Parfum Quantum (Umair / Alphascent)")
     st.caption(
-        "Pencapaian penjualan Umair Quantum terhadap target, dibagi rata ke "
-        "seluruh cabang."
+        "Pencapaian penjualan parfum Quantum terhadap target, dibagi rata ke "
+        "seluruh cabang. Merek **Umair** dan **Alphascent** dihitung bersama — "
+        "produknya sama, hanya penamaannya berbeda antar cabang."
     )
 
     if sales.empty:
@@ -6100,7 +6112,7 @@ with tab_umair:
         _uq_semua = sales[baris_umair_quantum(sales)]
         if _uq_semua.empty:
             st.warning(
-                "Tidak ditemukan penjualan Umair Quantum pada data. Periksa "
+                "Tidak ditemukan penjualan parfum Quantum pada data. Periksa "
                 "penulisan nama barang pada berkas penjualan."
             )
         else:
@@ -6338,8 +6350,9 @@ with tab_umair:
                                  use_container_width=True, key='uq_varian')
                     st.caption(
                         "Semua bentuk penulisan di atas dihitung sebagai satu "
-                        "produk yang sama — termasuk `3OML` yang memakai huruf "
-                        "O, bukan angka nol.")
+                        "produk yang sama — termasuk `ALPHASCENT QUANTUM` yang "
+                        "dipakai Bintara, dan `3OML` yang memakai huruf O "
+                        "alih-alih angka nol.")
                     st.markdown("**Penjual teratas**")
                     pj = (uq.groupby('PENJUAL')
                           .agg(Qty=('QTY', 'sum'), Omzet=('TOTAL HARGA', 'sum'))
@@ -6374,7 +6387,7 @@ with tab_umair:
                     _iu.append((
                         'aksi', f"{nfid(len(belum))} cabang belum menjual sama sekali",
                         f"<b>{', '.join(belum)}</b> belum mencatat satu pun "
-                        f"penjualan Umair Quantum. Karena produknya baru "
+                        f"penjualan parfum Quantum. Karena produknya baru "
                         f"berjalan {nfid(hari_jual)} hari, kemungkinan besar ini "
                         f"soal ketersediaan barang atau pengenalan produk ke tim "
                         f"— bukan soal kemampuan menjual. Ini yang paling cepat "
@@ -6398,7 +6411,9 @@ with tab_umair:
                 _iu.append((
                     'info', "Cara angka ini dihitung",
                     f"Produk dikenali dari nama barang yang memuat kata "
-                    f"<b>UMAIR</b> dan <b>QUANTUM</b>. Penulisan "
+                    f"<b>QUANTUM</b> bersama merek <b>UMAIR</b> atau "
+                    f"<b>ALPHASCENT</b> — Bintara mencatatnya sebagai Alphascent, "
+                    f"cabang lain Umair, tapi produknya sama. Penulisan "
                     f"<code>3OML</code> (huruf O) disamakan dengan "
                     f"<code>30ML</code> — tanpa penyamaan ini, "
                     f"{nfid(float(uq[uq['NAMA BARANG'].astype(str).str.upper().str.contains('3OML')]['QTY'].sum()))} "
@@ -6428,7 +6443,7 @@ with tab_umair:
                      lambda v: nfid(v), True),
                 ]
                 tombol_pdf(
-                    "Penjualan Umair Quantum", _pot_u, _metrik_u,
+                    "Penjualan Parfum Quantum", _pot_u, _metrik_u,
                     temuan=[(j, ju, re.sub('<[^>]+>', '', isi))
                             for j, ju, isi in _iu],
                     kpis=[{'label': 'Terjual', 'value': nfid(qty),
@@ -6449,8 +6464,10 @@ with tab_umair:
                            'sub': f"dari {nfid(len(gu))} cabang",
                            'warna': (_PR if belum else _PG)}],
                     metodologi=(
-                        "Produk dikenali dari nama barang yang memuat kata UMAIR "
-                        "dan QUANTUM. Penulisan 3OML (huruf O) disamakan dengan "
+                        "Produk dikenali dari nama barang yang memuat kata QUANTUM "
+                        "bersama merek UMAIR atau ALPHASCENT (Bintara memakai nama "
+                        "Alphascent untuk produk yang sama). Penulisan 3OML "
+                        "(huruf O) disamakan dengan "
                         "30ML supaya tidak ada penjualan yang terlewat. Jumlah "
                         "memakai kolom QTY. Target dibagi rata ke seluruh "
                         "cabang. Rata-rata harian dihitung sejak tanggal "
@@ -6466,11 +6483,13 @@ with tab_umair:
 
                 with st.expander("ℹ️ Catatan perhitungan"):
                     st.write(
-                        f"**Produk.** Semua nama barang yang memuat kata UMAIR "
-                        f"dan QUANTUM. Di sumber data penulisannya tidak "
-                        f"seragam — ada `UMAIR QUANTUM 30ML` dan `UMAIR QUANTUM "
-                        f"3OML` (huruf O, bukan angka nol). Keduanya dihitung "
-                        f"sebagai produk yang sama.\n\n"
+                        f"**Produk.** Semua nama barang yang memuat kata QUANTUM "
+                        f"bersama merek UMAIR atau ALPHASCENT. Cabang Bintara "
+                        f"mencatat produk ini sebagai `ALPHASCENT QUANTUM`, "
+                        f"cabang lain `UMAIR QUANTUM` — produknya sama. "
+                        f"Penulisan ukuran juga tidak seragam: ada `30ML` dan "
+                        f"`3OML` yang memakai huruf O. Semuanya dihitung "
+                        f"sebagai satu produk.\n\n"
                         f"**Jumlah.** Memakai kolom QTY, bukan jumlah baris. "
                         f"Satu nota bisa memuat lebih dari satu botol.\n\n"
                         f"**Target.** {nfid(target_total_u)} botol untuk seluruh "

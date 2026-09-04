@@ -26,7 +26,18 @@ import streamlit as st
 # ---------------------------------------------------------------------------
 # Konfigurasi halaman & style
 # ---------------------------------------------------------------------------
-st.set_page_config(page_title="Dashboard Service Cabang", layout="wide", page_icon="📊")
+st.set_page_config(page_title="Dashboard Service Cabang", layout="wide",
+                   page_icon="📊", initial_sidebar_state="expanded")
+
+# Logo perusahaan di pojok kiri atas. Dibungkus try/except karena st.logo baru
+# ada pada Streamlit 1.35 — pada versi lama aplikasinya tetap jalan, hanya
+# tanpa logo.
+_LOGO = Path(__file__).parent / "assets" / "logo_mflash.png"
+if _LOGO.exists():
+    try:
+        st.logo(str(_LOGO))
+    except Exception:  # noqa: BLE001
+        pass
 
 # Data bawaan yang tersimpan permanen di dalam repo (folder data/). Kalau file
 # ini ada, dashboard otomatis memuatnya tanpa perlu upload manual setiap kali
@@ -86,6 +97,30 @@ st.markdown("""
        padding:14px 18px;margin-bottom:10px;}
   .success-banner b{color:#0f5132;}
   .success-banner span{font-size:12.5px;color:#0f5132;line-height:1.6;}
+
+  /* ---- Tab ---------------------------------------------------------- */
+  /* Kelompok utama dibuat menonjol dan bisa dibungkus ke baris berikutnya
+     supaya tidak ada tab yang tersembunyi di layar sempit. */
+  .stTabs [data-baseweb="tab-list"]{gap:4px;flex-wrap:wrap;}
+  .stTabs [data-baseweb="tab"]{
+      height:auto;padding:9px 16px;border-radius:10px 10px 0 0;
+      font-weight:700;font-size:14px;color:#5b6478;}
+  .stTabs [aria-selected="true"]{background:#1F3864;color:#fff !important;}
+  /* Sub-tab dibedakan: lebih kecil, kotak, dan bergaris bawah saat aktif. */
+  .stTabs .stTabs [data-baseweb="tab"]{
+      font-size:12.5px;padding:6px 12px;border-radius:8px;}
+  .stTabs .stTabs [aria-selected="true"]{
+      background:#EAF0FA;color:#1F3864 !important;
+      box-shadow:inset 0 -3px 0 #1F3864;}
+
+  /* ---- Rapian umum -------------------------------------------------- */
+  .block-container{padding-top:2.2rem;}
+  h2{color:#1F3864;font-weight:800;letter-spacing:-.2px;}
+  h4{color:#1F3864;font-weight:700;margin-top:.4rem;}
+  hr{margin:1.1rem 0;}
+  section[data-testid="stSidebar"]{border-right:1px solid #e3e7f0;}
+  div[data-testid="stMetricValue"]{color:#1F3864;}
+  .stDownloadButton button{border-radius:9px;font-weight:600;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -1486,15 +1521,32 @@ if st.session_state.get("ppt_bytes"):
 # ---------------------------------------------------------------------------
 # TABS
 # ---------------------------------------------------------------------------
-(tab_main, tab_pending, tab_done, tab_cancel, tab_mati, tab_jual, tab_mlf,
- tab_tek, tab_bundling, tab_reward, tab_pelanggan, tab_pilar,
- tab_produktif, tab_umair) = st.tabs(
-    ["📊 Dashboard Utama", "⚠️ Dashboard Pending", "✅ Dashboard Done",
-     "🚫 Dashboard Cancel", "🔌 Mati Total", "💰 Penjualan", "🎫 Voucher MLF",
-     "🧰 Omzet & Bagi Hasil Teknisi", "🎁 Bundling Aksesoris",
-     "🏆 Budget Bundling Nota", "👥 Kategori Pelanggan", "🏛️ Kategori Pilar",
-     "🥇 Produktivitas Cabang", "🧴 Parfum Quantum"]
-)
+# Empat kelompok besar, masing-masing berisi sub-tab. Sebelumnya keempat belas
+# dashboard berjejer dalam satu baris sehingga sebagian tersembunyi di layar
+# laptop dan harus digeser untuk dijangkau.
+#
+# Sub-tab dibuat di dalam konteks kelompoknya, lalu isinya ditulis belakangan
+# lewat `with tab_xxx:` seperti biasa. Ini boleh: wadah Streamlit terikat pada
+# posisinya di halaman, bukan pada urutan penulisan kode.
+_grup = st.tabs(["🔧 Servis", "💰 Penjualan", "👥 Orang", "🎯 Target & Program"])
+
+with _grup[0]:
+    (tab_main, tab_pending, tab_done, tab_cancel, tab_mati) = st.tabs(
+        ["📊 Utama", "⚠️ Pending", "✅ Done", "🚫 Cancel", "🔌 Mati Total"])
+
+with _grup[1]:
+    (tab_jual, tab_mlf, tab_bundling, tab_pilar) = st.tabs(
+        ["💰 Rekap Penjualan", "🎫 Voucher MLF", "🎁 Bundling Aksesoris",
+         "🏛️ Kategori Pilar"])
+
+with _grup[2]:
+    (tab_tek, tab_pelanggan) = st.tabs(
+        ["🧰 Omzet & Bagi Hasil Teknisi", "👥 Kategori Pelanggan"])
+
+with _grup[3]:
+    (tab_produktif, tab_reward, tab_umair) = st.tabs(
+        ["🥇 Produktivitas Cabang", "🏆 Budget Bundling Nota",
+         "🧴 Parfum Quantum"])
 
 # =============================================================================
 # TAB 1: DASHBOARD UTAMA

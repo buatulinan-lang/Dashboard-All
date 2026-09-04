@@ -1167,37 +1167,54 @@ def render_detail_dashboard(filtered_df, total_unique_all, *, status_bucket, jen
                     f"panjang ini lebih dulu; jumlahnya sedikit tapi dampaknya pada "
                     f"citra layanan paling besar."))
 
+        # Semua akses ke peringkat teratas dijaga panjangnya. Saat filter
+        # dipersempit, satu kelompok bisa hanya berisi satu cabang atau satu
+        # jenis kerusakan — mengambil elemen kedua pada keadaan itu membuat
+        # seluruh aplikasi berhenti dengan IndexError.
         if _sb == 'PENDING':
-            dua = cab_r.head(2)
-            porsi = dua.sum() / total_s * 100
-            _an.append(('aksi', 'Prioritaskan dua cabang ini',
-                        f"<b>{dua.index[0]}</b> ({dua.iloc[0]} unit) dan "
-                        f"<b>{dua.index[1]}</b> ({dua.iloc[1]} unit) menyumbang "
-                        f"{porsi:.1f}% dari seluruh pendingan. <b>Tindakan:</b> "
-                        f"penelusuran di dua titik ini memberi dampak terbesar."))
-            _an.append(('aksi', f'Kerusakan {ker_r.index[0]} paling menumpuk',
-                        f"{ker_r.iloc[0]} unit ({ker_r.iloc[0]/total_s*100:.1f}% pendingan). "
-                        f"<b>Tindakan:</b> cek ketersediaan sparepart dan kejelasan "
-                        f"estimasi biaya untuk jenis kerusakan ini."))
+            if len(cab_r) >= 2:
+                dua = cab_r.head(2)
+                porsi = dua.sum() / total_s * 100
+                _an.append(('aksi', 'Prioritaskan dua cabang ini',
+                            f"<b>{dua.index[0]}</b> ({nfid(dua.iloc[0])} unit) dan "
+                            f"<b>{dua.index[1]}</b> ({nfid(dua.iloc[1])} unit) menyumbang "
+                            f"{pctid(porsi)} dari seluruh pendingan. <b>Tindakan:</b> "
+                            f"penelusuran di dua titik ini memberi dampak terbesar."))
+            elif len(cab_r) == 1:
+                _an.append(('aksi', f'Seluruh pendingan ada di {cab_r.index[0]}',
+                            f"{nfid(cab_r.iloc[0])} unit — semuanya di satu cabang. "
+                            f"<b>Tindakan:</b> penelusuran cukup dipusatkan di sini."))
+            if len(ker_r):
+                _an.append(('aksi', f'Kerusakan {ker_r.index[0]} paling menumpuk',
+                            f"{nfid(ker_r.iloc[0])} unit "
+                            f"({pctid(ker_r.iloc[0] / total_s * 100)} pendingan). "
+                            f"<b>Tindakan:</b> cek ketersediaan sparepart dan kejelasan "
+                            f"estimasi biaya untuk jenis kerusakan ini."))
         elif _sb == 'CANCEL':
-            _an.append(('aksi', f'Kerusakan {ker_r.index[0]} paling sering dibatalkan',
-                        f"{ker_r.iloc[0]} unit ({ker_r.iloc[0]/total_s*100:.1f}% pembatalan). "
-                        f"<b>Tindakan:</b> sampaikan estimasi biaya lebih awal untuk "
-                        f"jenis ini agar pelanggan tidak menunggu lama sebelum membatalkan."))
-            _an.append(('perhatian', f'Pembatalan terbanyak di {cab_r.index[0]}',
-                        f"{cab_r.iloc[0]} unit ({cab_r.iloc[0]/total_s*100:.1f}%). "
-                        f"<b>Tindakan:</b> bandingkan harga dan waktu tunggu cabang ini "
-                        f"dengan cabang yang pembatalannya rendah."))
+            if len(ker_r):
+                _an.append(('aksi', f'Kerusakan {ker_r.index[0]} paling sering dibatalkan',
+                            f"{nfid(ker_r.iloc[0])} unit "
+                            f"({pctid(ker_r.iloc[0] / total_s * 100)} pembatalan). "
+                            f"<b>Tindakan:</b> sampaikan estimasi biaya lebih awal untuk "
+                            f"jenis ini agar pelanggan tidak menunggu lama sebelum membatalkan."))
+            if len(cab_r):
+                _an.append(('perhatian', f'Pembatalan terbanyak di {cab_r.index[0]}',
+                            f"{nfid(cab_r.iloc[0])} unit "
+                            f"({pctid(cab_r.iloc[0] / total_s * 100)}). "
+                            f"<b>Tindakan:</b> bandingkan harga dan waktu tunggu cabang ini "
+                            f"dengan cabang yang pembatalannya rendah."))
         else:  # DONE
             if len(tek_r):
                 _an.append(('baik', 'Teknisi paling produktif',
-                            f"<b>{tek_r.index[0]}</b> menyelesaikan {tek_r.iloc[0]:,} unit. "
+                            f"<b>{tek_r.index[0]}</b> menyelesaikan "
+                            f"{nfid(tek_r.iloc[0])} unit. "
                             f"<b>Tindakan:</b> pelajari cara kerjanya untuk dijadikan "
                             f"acuan pelatihan teknisi lain."))
-            _an.append(('info', 'Beban kerja terbesar',
-                        f"Kerusakan <b>{ker_r.index[0]}</b> menyumbang "
-                        f"{ker_r.iloc[0]/total_s*100:.1f}% penyelesaian. "
-                        f"<b>Tindakan:</b> pastikan stok sparepart jenis ini aman."))
+            if len(ker_r):
+                _an.append(('info', 'Beban kerja terbesar',
+                            f"Kerusakan <b>{ker_r.index[0]}</b> menyumbang "
+                            f"{pctid(ker_r.iloc[0] / total_s * 100)} penyelesaian. "
+                            f"<b>Tindakan:</b> pastikan stok sparepart jenis ini aman."))
 
         tanpa = (sub['TEKNISI'] == 'TIDAK ADA TEKNISI').sum()
         if tanpa > total_s * 0.05:

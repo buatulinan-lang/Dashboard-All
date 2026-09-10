@@ -821,6 +821,170 @@ def panel_analisa(items):
     st.markdown("".join(blok), unsafe_allow_html=True)
 
 
+# Penomoran Samurai: satu Samurai = satu kuartal kalender. Acuannya
+# Januari–Maret 2026 = Samurai 37, dan itu cocok dengan laporan pekanan
+# perusahaan ("PEKAN 5 SAMURAI 39, 6 Agustus 2026" → Juli–September 2026 = 39).
+SAMURAI_ACUAN_TAHUN = 2026
+SAMURAI_ACUAN_NOMOR = 37          # Januari–Maret 2026
+
+
+def nomor_samurai(t: pd.Series) -> pd.Series:
+    kuartal = (t.dt.month - 1) // 3 + 1
+    return (SAMURAI_ACUAN_NOMOR + (t.dt.year - SAMURAI_ACUAN_TAHUN) * 4
+            + (kuartal - 1))
+
+
+def rentang_samurai(nomor: int):
+    """Kembalikan (tanggal_mulai, tanggal_akhir) untuk satu nomor Samurai."""
+    selisih = int(nomor) - SAMURAI_ACUAN_NOMOR
+    tahun = SAMURAI_ACUAN_TAHUN + selisih // 4
+    kuartal = selisih % 4 + 1
+    bulan_awal = (kuartal - 1) * 3 + 1
+    bulan_akhir = bulan_awal + 2
+    return (pd.Timestamp(tahun, bulan_awal, 1),
+            pd.Timestamp(tahun, bulan_akhir,
+                         calendar.monthrange(tahun, bulan_akhir)[1]))
+
+
+def label_samurai(nomor: int) -> str:
+    a, b = rentang_samurai(nomor)
+    return (f"Samurai {int(nomor)} · {BULAN_NAMES[a.month]}–"
+            f"{BULAN_NAMES[b.month]} {b.year}")
+
+
+# Warna khas MFLASH untuk tabel gambar: biru dongker, oranye, latar krem.
+WARNA_MF = {
+    'dongker': '#1F3864',
+    'dongker_muda': '#2E5394',
+    'oranye': '#E0921F',
+    'oranye_muda': '#F6E3C4',
+    'krem': '#FBF4E6',
+    'krem_baris': '#F5EBD8',
+    'teks': '#20242E',
+    'garis': '#D9C9A8',
+}
+
+
+def tabel_jadi_jpeg(df: pd.DataFrame, judul: str, subjudul: str = "",
+                    catatan: str = "", lebar_kolom_pertama: float = 2.0) -> bytes:
+    """Ubah tabel menjadi gambar JPEG bergaya MFLASH.
+
+    Memakai matplotlib, bukan Pillow, karena matplotlib membawa fontnya sendiri
+    — pada Streamlit Cloud belum tentu ada berkas font yang bisa dipakai Pillow,
+    dan tulisannya akan berubah jadi kotak-kotak kecil tanpa font yang benar.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    n_baris, n_kolom = df.shape
+    lebar = max(9.0, 1.35 * n_kolom + lebar_kolom_pertama)
+    n_kolom_isi = n_kolom
+    # Tinggi disusun dari bagian-bagiannya (kepala, baris, catatan) supaya
+    # judul dan tabel tidak pernah berebut ruang.
+    t_kepala, t_baris, t_kaki = 1.05, 0.30, (0.45 if catatan else 0.15)
+    tinggi = t_kepala + t_baris * (n_baris + 1.6) + t_kaki
+    fig, ax = plt.subplots(figsize=(lebar, tinggi), dpi=170)
+    fig.patch.set_facecolor(WARNA_MF['krem'])
+    ax.set_facecolor(WARNA_MF['krem'])
+    ax.axis('off')
+    # Tabel menempati ruang di bawah kepala, di atas kaki.
+    ax.set_position([0.0, t_kaki / tinggi, 1.0,
+                     1.0 - (t_kepala + t_kaki) / tinggi])
+
+    # Nama baris dijadikan kolom biasa, bukan rowLabels. rowLabels digambar di
+    # luar kotak sumbu, sehingga terpotong begitu sumbunya dirapatkan ke tepi
+    # kiri — nama cabangnya hilang sama sekali dari gambar.
+    isi = [[str(i)] + [str(v) for v in baris]
+           for i, baris in zip(df.index, df.astype(str).values)]
+
+    def _lipat(judul_kolom: str, batas: int = 13) -> str:
+        """Pecah judul kolom yang panjang ke dua baris.
+
+        Tanpa ini, judul seperti "Rata-rata MT Cancel / Hari" melebar melewati
+        selnya dan menimpa judul kolom sebelahnya.
+        """
+        s = str(judul_kolom).replace(' / ', ' /')
+        if len(s) <= batas:
+            return s
+        kata, baris_teks, sekarang = s.split(), [], ''
+        for w in kata:
+            calon = (sekarang + ' ' + w).strip()
+            if len(calon) > batas and sekarang:
+                baris_teks.append(sekarang)
+                sekarang = w
+            else:
+                sekarang = calon
+        if sekarang:
+            baris_teks.append(sekarang)
+        return '\n'.join(baris_teks[:2]) if len(baris_teks) <= 2 else (
+            baris_teks[0] + '\n' + ' '.join(baris_teks[1:]))
+
+    kepala = ([str(df.index.name or 'CABANG')]
+              + [_lipat(c) for c in df.columns])
+
+    tab = ax.table(cellText=isi, colLabels=kepala, cellLoc='right',
+                   loc='upper center')
+    tab.auto_set_font_size(False)
+    tab.set_fontsize(8.5)
+    tab.scale(1, 1.42)
+
+    # Kolom pertama dibuat lebih lebar supaya nama cabang muat.
+    lebar_sisa = (1.0 - 0.155) / max(n_kolom, 1)
+    for (r, c), sel in tab.get_celld().items():
+        sel.set_width(0.155 if c == 0 else lebar_sisa)
+
+    baris_total = [i for i, x in enumerate(df.index)
+                   if str(x).upper().startswith(('SELURUH', 'TOTAL'))]
+
+    for (r, c), sel in tab.get_celld().items():
+        sel.set_edgecolor(WARNA_MF['garis'])
+        sel.set_linewidth(0.6)
+        if r == 0:                                   # judul kolom
+            sel.set_facecolor(WARNA_MF['dongker'])
+            sel.set_text_props(color='white', fontweight='bold')
+            sel.set_height(sel.get_height() * 2.1)   # ruang untuk dua baris
+            if c == 0:
+                sel.set_text_props(ha='left')
+                sel._text.set_x(0.04)
+        elif c == 0:                                 # nama cabang
+            akhir = (r - 1) in baris_total
+            sel.set_facecolor(WARNA_MF['oranye'] if akhir
+                              else WARNA_MF['dongker_muda'])
+            sel.set_text_props(color='white', fontweight='bold', ha='left')
+            sel._text.set_x(0.04)
+        else:
+            akhir = (r - 1) in baris_total
+            if akhir:
+                sel.set_facecolor(WARNA_MF['oranye_muda'])
+                sel.set_text_props(fontweight='bold', color=WARNA_MF['teks'])
+            else:
+                sel.set_facecolor(WARNA_MF['krem'] if r % 2
+                                  else WARNA_MF['krem_baris'])
+                sel.set_text_props(color=WARNA_MF['teks'])
+
+    # Posisi judul dihitung dalam inci lalu diubah ke pecahan tinggi gambar,
+    # sehingga jaraknya tetap sama berapa pun banyaknya baris tabel.
+    fig.text(0.012, 1 - 0.32 / tinggi, judul, ha='left', va='top', fontsize=15,
+             fontweight='bold', color=WARNA_MF['dongker'])
+    if subjudul:
+        fig.text(0.012, 1 - 0.66 / tinggi, subjudul, ha='left', va='top',
+                 fontsize=9.5, color=WARNA_MF['oranye'], fontweight='bold')
+    if catatan:
+        fig.text(0.012, 0.16 / tinggi, catatan, ha='left', va='bottom',
+                 fontsize=7.5, color='#7A6A4A')
+
+    buf = io.BytesIO()
+    # pil_kwargs, bukan quality= — matplotlib versi baru meneruskan pengaturan
+    # mutu gambar lewat Pillow, dan quality= langsung ditolak.
+    # bbox_inches sengaja TIDAK dipakai: tata letaknya sudah dihitung sendiri,
+    # dan pemangkasan otomatis justru menggeser judul yang sudah pas.
+    fig.savefig(buf, format='jpeg', facecolor=WARNA_MF['krem'],
+                pil_kwargs={'quality': 92})
+    plt.close(fig)
+    return buf.getvalue()
+
+
 def apply_filters(df: pd.DataFrame, tahun, bulan, cabang) -> pd.DataFrame:
     out = df
     if tahun != 'Semua Tahun':
@@ -3501,6 +3665,232 @@ with tab_mati:
                                 "diselamatkan kalau segera dikerjakan.")
 
                     # =========================================================
+                    # REKAP SEMUA CABANG (siap unduh)
+                    # =========================================================
+                    st.markdown("---")
+                    st.markdown("#### Rekap Harian Semua Cabang per Samurai")
+
+                    # Rekap ini memakai periode Samurai (3 bulan), bukan filter
+                    # tahun/bulan di sidebar — sesuai cara perusahaan menyusun
+                    # target. Filter cabang juga diabaikan supaya seluruh cabang
+                    # bisa dibandingkan berdampingan.
+                    _sv_semua = data[data['TGL PENGIRIMAN'] >= batas]
+                    _sam_ada_mt = sorted(
+                        {int(x) for x in
+                         nomor_samurai(_sv_semua['TGL PENGIRIMAN'].dropna()).unique()})
+                    if not _sam_ada_mt:
+                        st.caption("Tidak ada data untuk direkap.")
+                        _mt_smw = _sv_smw = pd.DataFrame()
+                    else:
+                        _sam_mt = st.selectbox(
+                            "Periode Samurai", _sam_ada_mt,
+                            index=len(_sam_ada_mt) - 1,
+                            format_func=label_samurai, key='mt_sam')
+                        _a_mt, _b_mt = rentang_samurai(_sam_mt)
+                        _sv_smw = _sv_semua[
+                            (_sv_semua['TGL PENGIRIMAN'] >= _a_mt)
+                            & (_sv_semua['TGL PENGIRIMAN'] <= _b_mt)]
+                        _mt_smw = mt_ukur[(mt_ukur['TGL PENGIRIMAN'] >= _a_mt)
+                                          & (mt_ukur['TGL PENGIRIMAN'] <= _b_mt)]
+
+                    if _mt_smw.empty or _sv_smw.empty:
+                        st.caption("Tidak ada data untuk periode ini.")
+                    else:
+                        # Pembagi hari dibuat sama untuk semua cabang supaya
+                        # angkanya bisa dibandingkan langsung: dari awal periode
+                        # Samurai sampai tanggal data terakhir. Memakai rentang
+                        # data tiap cabang sendiri-sendiri akan membuat cabang
+                        # yang datanya lebih pendek tampak lebih sibuk.
+                        _t = _sv_smw['TGL PENGIRIMAN'].dropna()
+                        _akhir_mt = min(_t.max(), _b_mt)
+                        _hari = max((_akhir_mt - _a_mt).days + 1, 1)
+                        _hari_penuh = (_b_mt - _a_mt).days + 1
+
+                        _cabs = sorted(_sv_smw['CABANG'].dropna().unique())
+                        rk = pd.DataFrame(index=_cabs)
+                        rk.index.name = 'CABANG'
+
+                        rk['Unit Masuk'] = (_sv_smw.groupby('CABANG').size()
+                                            .reindex(rk.index).fillna(0))
+                        rk['Rata-rata Masuk / Hari'] = rk['Unit Masuk'] / _hari
+
+                        rk['Unit Mati Total'] = (_mt_smw.groupby('CABANG').size()
+                                                 .reindex(rk.index).fillna(0))
+                        rk['Rata-rata Mati Total / Hari'] = rk['Unit Mati Total'] / _hari
+                        rk['% Mati Total'] = (rk['Unit Mati Total']
+                                              / rk['Unit Masuk'].replace(0, float('nan')) * 100)
+
+                        _mt_done = _mt_smw[_mt_smw['STATUS_BUCKET'] == 'DONE']
+                        _mt_cncl = _mt_smw[_mt_smw['STATUS_BUCKET'] == 'CANCEL']
+                        rk['MT Done'] = (_mt_done.groupby('CABANG').size()
+                                         .reindex(rk.index).fillna(0))
+                        rk['MT Cancel'] = (_mt_cncl.groupby('CABANG').size()
+                                           .reindex(rk.index).fillna(0))
+                        rk['Rata-rata MT Done / Hari'] = rk['MT Done'] / _hari
+                        rk['Rata-rata MT Cancel / Hari'] = rk['MT Cancel'] / _hari
+
+                        rk['Omzet Mati Total'] = (_mt_smw.groupby('CABANG')['OMZET'].sum()
+                                                  .reindex(rk.index).fillna(0))
+                        rk['Jadi Nota'] = (_mt_smw.groupby('CABANG')['JADI_NOTA'].sum()
+                                           .reindex(rk.index).fillna(0))
+                        rk['Tidak Jadi Nota'] = rk['Unit Mati Total'] - rk['Jadi Nota']
+                        rk['Success Rate'] = (rk['Jadi Nota']
+                                              / rk['Unit Mati Total'].replace(0, float('nan')) * 100)
+
+                        # Potensi loss = unit yang tidak jadi nota dikali nilai
+                        # rata-rata nota di cabang itu sendiri. Memakai rata-rata
+                        # cabang masing-masing, bukan rata-rata gabungan, karena
+                        # nilai servis antar cabang berbeda cukup jauh.
+                        _rata_nota_cab = (rk['Omzet Mati Total']
+                                          / rk['Jadi Nota'].replace(0, float('nan')))
+                        _rata_umum = (float(_mt_smw['OMZET'].sum())
+                                      / max(float(_mt_smw['JADI_NOTA'].sum()), 1))
+                        rk['Rata-rata / Nota'] = _rata_nota_cab.fillna(_rata_umum)
+                        rk['Potensi Loss'] = rk['Tidak Jadi Nota'] * rk['Rata-rata / Nota']
+
+                        rk = rk.sort_values('Unit Masuk', ascending=False)
+
+                        _tot = rk.sum(numeric_only=True)
+                        _tot['Rata-rata Masuk / Hari'] = rk['Unit Masuk'].sum() / _hari
+                        _tot['Rata-rata Mati Total / Hari'] = rk['Unit Mati Total'].sum() / _hari
+                        _tot['Rata-rata MT Done / Hari'] = rk['MT Done'].sum() / _hari
+                        _tot['Rata-rata MT Cancel / Hari'] = rk['MT Cancel'].sum() / _hari
+                        _tot['% Mati Total'] = (rk['Unit Mati Total'].sum()
+                                                / max(rk['Unit Masuk'].sum(), 1) * 100)
+                        _tot['Success Rate'] = (rk['Jadi Nota'].sum()
+                                                / max(rk['Unit Mati Total'].sum(), 1) * 100)
+                        _tot['Rata-rata / Nota'] = _rata_umum
+                        rk_tampil = pd.concat([rk, _tot.to_frame('SELURUH CABANG').T])
+
+                        _kolom = ['Unit Masuk', 'Rata-rata Masuk / Hari',
+                                  'Unit Mati Total', 'Rata-rata Mati Total / Hari',
+                                  '% Mati Total', 'MT Done', 'Rata-rata MT Done / Hari',
+                                  'MT Cancel', 'Rata-rata MT Cancel / Hari',
+                                  'Jadi Nota', 'Tidak Jadi Nota', 'Success Rate',
+                                  'Omzet Mati Total', 'Rata-rata / Nota', 'Potensi Loss']
+                        st.dataframe(
+                            rk_tampil[_kolom].style.format({
+                                'Unit Masuk': '{:,.0f}',
+                                'Rata-rata Masuk / Hari': '{:,.1f}',
+                                'Unit Mati Total': '{:,.0f}',
+                                'Rata-rata Mati Total / Hari': '{:,.2f}',
+                                '% Mati Total': '{:.1f}%',
+                                'MT Done': '{:,.0f}',
+                                'Rata-rata MT Done / Hari': '{:,.2f}',
+                                'MT Cancel': '{:,.0f}',
+                                'Rata-rata MT Cancel / Hari': '{:,.2f}',
+                                'Jadi Nota': '{:,.0f}', 'Tidak Jadi Nota': '{:,.0f}',
+                                'Success Rate': '{:.1f}%',
+                                'Omzet Mati Total': 'Rp {:,.0f}',
+                                'Rata-rata / Nota': 'Rp {:,.0f}',
+                                'Potensi Loss': 'Rp {:,.0f}'}),
+                            use_container_width=True, height=460, key='mt_rekap')
+
+                        st.caption(
+                            f"**{label_samurai(_sam_mt)}** — rata-rata harian "
+                            f"memakai pembagi **{nfid(_hari)} hari** "
+                            f"({_a_mt:%d %b} – {_akhir_mt:%d %b %Y})"
+                            + (f", dari {nfid(_hari_penuh)} hari periode penuh"
+                               if _hari < _hari_penuh else "")
+                            + f". Pembaginya sama untuk seluruh cabang supaya "
+                            f"angkanya bisa dibandingkan langsung. **Potensi "
+                            f"loss** = unit mati total yang tidak menjadi nota "
+                            f"dikali nilai rata-rata nota di cabang itu sendiri "
+                            f"— batas atas, karena sebagian unit memang tidak "
+                            f"layak diperbaiki. Tabel ini selalu memuat seluruh "
+                            f"cabang dan tidak terpengaruh filter tahun, bulan, "
+                            f"maupun cabang di sidebar."
+                        )
+                        if _hari < _hari_penuh:
+                            st.info(
+                                f"ℹ️ {label_samurai(_sam_mt)} baru berjalan "
+                                f"{nfid(_hari)} dari {nfid(_hari_penuh)} hari. "
+                                f"Kolom jumlah (Unit Masuk, Unit Mati Total, "
+                                f"Omzet, Potensi Loss) masih akan bertambah "
+                                f"sampai akhir periode; kolom rata-rata harian "
+                                f"sudah bisa dibandingkan apa adanya."
+                            )
+
+                        _nm = f"rekap_mati_total_samurai_{int(_sam_mt)}"
+                        _csv = rk_tampil[_kolom].reset_index().rename(
+                            columns={'index': 'CABANG'}).to_csv(index=False)
+
+                        # Versi gambar: angkanya diformat gaya Indonesia lebih
+                        # dulu, karena di dalam gambar tidak ada penata format
+                        # seperti pada tabel di layar.
+                        _rk_gbr = pd.DataFrame(index=rk_tampil.index)
+                        _rk_gbr.index.name = 'CABANG'
+                        for _k in _kolom:
+                            _v = rk_tampil[_k]
+                            if _k.startswith(('Omzet', 'Potensi', 'Rata-rata /')):
+                                _rk_gbr[_k] = [rp(x) for x in _v]
+                            elif _k.startswith('%') or _k == 'Success Rate':
+                                _rk_gbr[_k] = [pctid(x) for x in _v]
+                            elif _k.startswith('Rata-rata'):
+                                _rk_gbr[_k] = [nfid(x, 2) for x in _v]
+                            else:
+                                _rk_gbr[_k] = [nfid(x) for x in _v]
+
+                        _judul_gbr = "Rekap Mati Total — Semua Cabang"
+                        _sub_gbr = (f"{label_samurai(_sam_mt)} · "
+                                    f"{_a_mt:%d %b} – {_akhir_mt:%d %b %Y} · "
+                                    f"{nfid(_hari)} dari {nfid(_hari_penuh)} hari")
+                        _cat_gbr = ("Rata-rata harian memakai pembagi hari yang sama "
+                                    "untuk seluruh cabang.  |  Potensi loss = unit "
+                                    "mati total yang tidak menjadi nota x rata-rata "
+                                    "nilai nota di cabang itu sendiri.")
+
+                        _u1, _u2, _u3 = st.columns(3)
+                        with _u1:
+                            st.download_button(
+                                "⬇️ Unduh rekap semua cabang (CSV)",
+                                data=_csv.encode('utf-8-sig'),
+                                file_name=f"{_nm}.csv", mime="text/csv",
+                                use_container_width=True, key='mt_unduh_rekap')
+                        with _u2:
+                            try:
+                                _buf = io.BytesIO()
+                                with pd.ExcelWriter(_buf, engine='openpyxl') as _w:
+                                    (rk_tampil[_kolom].reset_index()
+                                     .rename(columns={'index': 'CABANG'})
+                                     .to_excel(_w, index=False,
+                                               sheet_name='Rekap Mati Total'))
+                                st.download_button(
+                                    "⬇️ Unduh rekap semua cabang (Excel)",
+                                    data=_buf.getvalue(), file_name=f"{_nm}.xlsx",
+                                    mime=("application/vnd.openxmlformats-"
+                                          "officedocument.spreadsheetml.sheet"),
+                                    use_container_width=True,
+                                    key='mt_unduh_rekap_xlsx')
+                            except Exception:  # noqa: BLE001
+                                st.caption("Unduhan Excel tidak tersedia "
+                                           "(openpyxl belum terpasang).")
+                        with _u3:
+                            try:
+                                _jpg = tabel_jadi_jpeg(
+                                    _rk_gbr, _judul_gbr, _sub_gbr, _cat_gbr)
+                                st.download_button(
+                                    "🖼️ Unduh rekap semua cabang (JPEG)",
+                                    data=_jpg, file_name=f"{_nm}.jpg",
+                                    mime="image/jpeg", use_container_width=True,
+                                    key='mt_unduh_rekap_jpg')
+                            except ModuleNotFoundError:
+                                st.caption(
+                                    "Unduhan JPEG belum aktif — tambahkan "
+                                    "`matplotlib>=3.7` ke requirements.txt lalu "
+                                    "reboot aplikasi.")
+                            except Exception as e:  # noqa: BLE001
+                                st.caption(f"Gambar gagal dibuat: {e}")
+
+                        with st.expander("👁️ Pratinjau gambar"):
+                            try:
+                                st.image(tabel_jadi_jpeg(
+                                    _rk_gbr, _judul_gbr, _sub_gbr, _cat_gbr),
+                                    use_container_width=True)
+                            except Exception:  # noqa: BLE001
+                                st.caption("Pratinjau tidak tersedia.")
+
+                    # =========================================================
                     # DETAIL
                     # =========================================================
                     st.markdown("---")
@@ -5501,37 +5891,6 @@ with tab_pilar:
 # =============================================================================
 # TAB 13: PRODUKTIVITAS CABANG (periode Samurai)
 # =============================================================================
-# Penomoran Samurai: satu Samurai = satu kuartal kalender. Acuannya
-# Januari–Maret 2026 = Samurai 37, dan itu cocok dengan laporan pekanan
-# perusahaan ("PEKAN 5 SAMURAI 39, 6 Agustus 2026" → Juli–September 2026 = 39).
-SAMURAI_ACUAN_TAHUN = 2026
-SAMURAI_ACUAN_NOMOR = 37          # Januari–Maret 2026
-
-
-def nomor_samurai(t: pd.Series) -> pd.Series:
-    kuartal = (t.dt.month - 1) // 3 + 1
-    return (SAMURAI_ACUAN_NOMOR + (t.dt.year - SAMURAI_ACUAN_TAHUN) * 4
-            + (kuartal - 1))
-
-
-def rentang_samurai(nomor: int):
-    """Kembalikan (tanggal_mulai, tanggal_akhir) untuk satu nomor Samurai."""
-    selisih = int(nomor) - SAMURAI_ACUAN_NOMOR
-    tahun = SAMURAI_ACUAN_TAHUN + selisih // 4
-    kuartal = selisih % 4 + 1
-    bulan_awal = (kuartal - 1) * 3 + 1
-    bulan_akhir = bulan_awal + 2
-    return (pd.Timestamp(tahun, bulan_awal, 1),
-            pd.Timestamp(tahun, bulan_akhir,
-                         calendar.monthrange(tahun, bulan_akhir)[1]))
-
-
-def label_samurai(nomor: int) -> str:
-    a, b = rentang_samurai(nomor)
-    return (f"Samurai {int(nomor)} · {BULAN_NAMES[a.month]}–"
-            f"{BULAN_NAMES[b.month]} {b.year}")
-
-
 KOL_TARGET_GP = 'Target Gross Profit (Rp)'
 
 # Target gross profit per cabang untuk SATU periode Samurai penuh (3 bulan).

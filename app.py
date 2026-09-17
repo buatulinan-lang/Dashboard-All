@@ -503,6 +503,40 @@ def label_periode(bulan_gaji: int, tahun_gaji: int):
             f"({a.day} {BULAN_NAMES[a.month]} – {b.day} {BULAN_NAMES[b.month]} {b.year})")
 
 
+# --- periode bulan dengan cutoff tanggal 24 -> 23 -----------------------------
+# Dipakai di dashboard Mati Total supaya penanggalannya sama dengan pembagian
+# periode pada Bagi Hasil Teknisi. Bedanya hanya penamaan: di sini periode
+# dinamai menurut bulan tempat periode itu BERAKHIR.
+#   Periode September 2026 = 24 Agustus 2026 s/d 23 September 2026.
+
+def rentang_bulan_cut(bulan: int, tahun: int):
+    """Tanggal awal & akhir satu periode bulan bercutoff 24 -> 23."""
+    m_awal, th_awal = bulan - 1, tahun
+    if m_awal < 1:
+        m_awal, th_awal = 12, tahun - 1
+    return (pd.Timestamp(th_awal, m_awal, 24),
+            pd.Timestamp(tahun, bulan, 23))
+
+
+def label_bulan_cut(bulan: int, tahun: int) -> str:
+    a, b = rentang_bulan_cut(bulan, tahun)
+    return (f"{BULAN_NAMES[bulan]} {tahun} "
+            f"({a.day} {BULAN_NAMES[a.month]} – {b.day} {BULAN_NAMES[b.month]})")
+
+
+def bulan_cut(tgl: pd.Series):
+    """Tahun & bulan periode (cutoff 24 -> 23) dari tanggal kejadian.
+
+    Tanggal 24 ke atas sudah masuk hitungan periode bulan berikutnya, persis
+    seperti aturan cutoff pada Bagi Hasil Teknisi. Mengembalikan dua Series
+    (tahun, bulan) yang sejajar dengan `tgl`.
+    """
+    t = pd.to_datetime(tgl, errors='coerce')
+    maju = (t.dt.day >= 24).fillna(False).astype('int64')
+    p = t.dt.to_period('M') + maju
+    return p.dt.year, p.dt.month
+
+
 def daftar_periode_gaji(tgl_min, tgl_max):
     """Semua bulan penggajian yang periodenya beririsan dengan rentang data."""
     hasil = []
@@ -935,7 +969,8 @@ def tabel_jadi_jpeg(df: pd.DataFrame, judul: str, subjudul: str = "",
         sel.set_width(0.155 if c == 0 else lebar_sisa)
 
     baris_total = [i for i, x in enumerate(df.index)
-                   if str(x).upper().startswith(('SELURUH', 'TOTAL'))]
+                   if str(x).upper().startswith(('SELURUH', 'TOTAL', 'GABUNGAN',
+                                                 'JUMLAH'))]
 
     for (r, c), sel in tab.get_celld().items():
         sel.set_edgecolor(WARNA_MF['garis'])
@@ -3388,6 +3423,34 @@ with tab_mati:
                         f"'gagal' secara keliru."
                     )
 
+                # ---- penanggalan periode: cutoff tanggal 24 -> 23 ----------
+                # Kolom TAHUN/BULAN bawaan memakai bulan kalender. Di dashboard
+                # ini pembagian bulannya disamakan dengan Bagi Hasil Teknisi,
+                # yaitu periode September = 24 Agustus s/d 23 September. Kolom
+                # aslinya disimpan supaya tetap bisa dipakai kalau diperlukan.
+                mt_ukur['TAHUN KALENDER'] = mt_ukur['TAHUN']
+                mt_ukur['BULAN KALENDER'] = mt_ukur['BULAN']
+                mt_ukur['TAHUN'], mt_ukur['BULAN'] = bulan_cut(
+                    mt_ukur['TGL PENGIRIMAN'])
+
+                # Pembagi porsi (seluruh unit masuk) harus memakai penanggalan
+                # yang sama, kalau tidak pembilang dan penyebutnya beda periode.
+                _sv_cut = data[data['TGL PENGIRIMAN'] >= batas][
+                    ['TGL PENGIRIMAN', 'CABANG']].copy()
+                _sv_cut['TAHUN'], _sv_cut['BULAN'] = bulan_cut(
+                    _sv_cut['TGL PENGIRIMAN'])
+
+                _bl_txt = ("seluruh bulan" if f_bulan == 'Semua Bulan'
+                           else label_bulan_cut(
+                               int(f_bulan),
+                               int(f_tahun) if f_tahun != 'Semua Tahun'
+                               else int(pd.Timestamp(tgl_akhir).year)))
+                st.caption(
+                    f"📅 Pembagian bulan memakai **cutoff tanggal 24 s/d 23**, "
+                    f"sama seperti Bagi Hasil Teknisi — periode September = "
+                    f"24 Agustus s/d 23 September. Filter saat ini: **{_bl_txt}**."
+                )
+
                 sub = apply_filters(mt_ukur, f_tahun, f_bulan, f_cabang)
 
                 if sub.empty:
@@ -3400,8 +3463,8 @@ with tab_mati:
                     omzet = float(sub['OMZET'].sum())
                     laba = float(sub['LABA'].sum())
                     rata_nota = (omzet / n_jadi) if n_jadi else 0.0
-                    porsi_mt = (n_unit / len(apply_filters(data, f_tahun, f_bulan, f_cabang))
-                                * 100) if len(apply_filters(data, f_tahun, f_bulan, f_cabang)) else 0.0
+                    _n_semua = len(apply_filters(_sv_cut, f_tahun, f_bulan, f_cabang))
+                    porsi_mt = (n_unit / _n_semua * 100) if _n_semua else 0.0
 
                     warna_rate = ('linear-gradient(135deg,#16a34a,#22c55e)' if rate >= 55
                                   else ('linear-gradient(135deg,#f59e0b,#fbbf24)'
@@ -3433,6 +3496,8 @@ with tab_mati:
                     # GRAFIK BATANG PER BULAN
                     # =========================================================
                     st.markdown("#### Rekap per Bulan — Jadi Nota vs Tidak")
+                    st.caption("Setiap bulan di bawah ini berjalan dari tanggal "
+                               "**24 bulan sebelumnya** sampai **23 bulan itu**.")
 
                     th_opts = sorted(int(t) for t in sub['TAHUN'].dropna().unique())
                     if f_tahun != 'Semua Tahun':
@@ -3446,7 +3511,7 @@ with tab_mati:
                     if bl.empty:
                         st.caption("Tidak ada data untuk tahun tersebut.")
                     else:
-                        g = (bl.groupby(bl['TGL PENGIRIMAN'].dt.month)
+                        g = (bl.groupby(bl['BULAN'].astype(int))
                                .agg(unit=('JADI_NOTA', 'size'),
                                     jadi=('JADI_NOTA', 'sum'),
                                     omzet=('OMZET', 'sum'),
@@ -3457,6 +3522,11 @@ with tab_mati:
                         g['rate'] = g['jadi'] / g['unit'] * 100
                         g['mentah'] = g['akhir'] > ambang_matang
                         nama_bl = [BULAN_NAMES[int(i)] for i in g.index]
+                        rentang_bl = []
+                        for i in g.index:
+                            _a, _b = rentang_bulan_cut(int(i), int(th_pilih))
+                            rentang_bl.append(f"{_a.day}/{_a.month} – "
+                                              f"{_b.day}/{_b.month}")
                         tanda = ['*' if m else '' for m in g['mentah']]
                         label_bl = [f"{n}{t}" for n, t in zip(nama_bl, tanda)]
 
@@ -3503,6 +3573,7 @@ with tab_mati:
 
                         tb = pd.DataFrame({
                             'Bulan': nama_bl,
+                            'Rentang Tanggal': rentang_bl,
                             'Unit Mati Total': g['unit'].astype(int).values,
                             'Jadi Nota': g['jadi'].astype(int).values,
                             'Tidak Jadi': g['gagal'].astype(int).values,
